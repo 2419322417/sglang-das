@@ -1132,6 +1132,7 @@ class ModelConfig:
             "slimquant_w4a8_marlin",
             "w8a8_int8",
             "slimquant_marlin",
+            "modelslim",
         ]
         optimized_quantization_methods = [
             "fp8",

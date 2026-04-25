@@ -96,16 +96,7 @@ from sglang.srt.utils import (
     set_weight_attrs,
     use_intel_amx_backend,
 )
-if is_hip():
-    try:
-        from aiter.fused_moe_asm_wna16 import fused_experts_asm_impl
-        from aiter.ops.shuffle import asm_shuffle_weight_b8
-        import os
-        SGLANG_USE_AITER_FP8_ASM_MOE = os.getenv("SGLANG_USE_AITER_FP8_ASM_MOE", "0") == "1"
-    except ImportError:
-        SGLANG_USE_AITER_FP8_ASM_MOE = False
-else:
-    SGLANG_USE_AITER_FP8_ASM_MOE = False
+SGLANG_USE_AITER_FP8_ASM_MOE = False
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner.aiter import AiterMoeQuantInfo

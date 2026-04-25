@@ -63,7 +63,7 @@ from sglang.srt.utils.common import get_bool_env_var
 from sglang.srt.utils.custom_op import register_custom_op
 
 has_triton_kernels = is_triton_kernels_available()
-
+from sglang.srt.utils import get_bool_env_var
 
 if is_flashinfer_available():
     from flashinfer import (
