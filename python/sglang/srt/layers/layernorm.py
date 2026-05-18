@@ -37,6 +37,7 @@ from sglang.srt.utils import (
     is_musa,
     is_npu,
     is_xpu,
+    is_dcu
 )
 
 _is_cuda = is_cuda()
@@ -48,6 +49,7 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_xpu = is_xpu()
+_is_dcu = is_dcu()
 _flashinfer_layernorm_available = False
 
 if _is_cuda or _is_xpu or _is_musa:
@@ -84,6 +86,9 @@ elif _is_hip:
     except ImportError:
         # Fallback: vllm not available, will use forward_native
         _has_vllm_rms_norm = False
+if _is_dcu:
+    from lightop import op 
+    from lightop import gemma_fused_add_rmsnorm as gemma_fused_add_rmsnorm_dcu
 
 if _is_cuda:
     # HF-semantics RMSNorm kernel (JIT-compiled).  Used when `cast_x_before_out_mul=True`
@@ -323,19 +328,30 @@ class RMSNorm(MultiPlatformOp):
             return self.forward_native(x, residual, post_residual_addition)
 
         if not x.is_contiguous():
-            # NOTE: Remove this if aiter kernel supports discontinuous input
             x = x.contiguous()
+
         if residual is not None:
-            out = torch.empty_like(x)
-            residual_out = torch.empty_like(x)
-            if post_residual_addition is not None:
-                residual = residual + post_residual_addition
-            fused_add_rms_norm(
-                out, x, residual_out, residual, self.weight.data, self.variance_epsilon
-            )
-            return out, residual_out
+            try:
+                op.fused_add_rms_norm_opt(
+                    x,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+                return x, residual
+            except TypeError:
+                out = torch.empty_like(x)
+                residual_out = torch.empty_like(x)
+                if post_residual_addition is not None:
+                    residual = residual + post_residual_addition
+                fused_add_rms_norm(
+                    out, x, residual_out, residual, self.weight.data, self.variance_epsilon
+                )
+                return out, residual_out
+                
+
         out = torch.empty_like(x)
-        rms_norm(out, x, self.weight.data, self.variance_epsilon)
+        op.rms_norm_opt(out, x, self.weight.data, self.variance_epsilon)
         return out
 
     def forward_musa(
@@ -651,14 +667,20 @@ class GemmaRMSNorm(MultiPlatformOp):
             if not x.is_contiguous():
                 x = x.contiguous()
             if residual is not None:
-                out = torch.empty_like(x)
-                residual_out = torch.empty_like(x)
                 if post_residual_addition is not None:
                     residual = residual + post_residual_addition
-                fused_add_rms_norm(
+                if _is_dcu:
+                    out, residual_out=gemma_fused_add_rmsnorm_dcu(
+                        x, residual, self.weight.data, self.variance_epsilon
+                    )
+                    return out, residual_out
+                else:
+                    out = torch.empty_like(x)
+                    residual_out = torch.empty_like(x)
+                    fused_add_rms_norm(
                     out, x, residual_out, residual, w, self.variance_epsilon
                 )
-                return out, residual_out
+                    return out, residual_out
             out = torch.empty_like(x)
             rms_norm(out, x, w, self.variance_epsilon)
             return out

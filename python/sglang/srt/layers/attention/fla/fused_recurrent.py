@@ -10,6 +10,9 @@ import triton.language as tl
 
 from sglang.srt.layers.attention.fla.op import exp
 from sglang.srt.layers.attention.fla.utils import input_guard
+from sglang.srt.utils import get_bool_env_var
+
+_use_decode_aiter_linear_attn = get_bool_env_var("SGLANG_USE_AITER_LINEAR_ATTN")
 
 
 @triton.jit(do_not_specialize=["T"])
@@ -369,36 +372,51 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     stride_final_state_token = initial_state.stride(0)
     stride_indices_seq = ssm_state_indices.stride(0)
 
-    NV = triton.cdiv(V, BV)
-    grid = (NV, B * HV)
-    fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
-        mixed_qkv=mixed_qkv,
-        a=a,
-        b=b,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        o=out,
-        h0=initial_state,
-        ht=initial_state,
-        ssm_state_indices=ssm_state_indices,
-        scale=scale,
-        stride_mixed_qkv_tok=stride_mixed_qkv_tok,
-        stride_a_tok=stride_a_tok,
-        stride_b_tok=stride_b_tok,
-        stride_init_state_token=stride_init_state_token,
-        stride_final_state_token=stride_final_state_token,
-        stride_indices_seq=stride_indices_seq,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        SOFTPLUS_THRESHOLD=20.0,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
+    if not _use_decode_aiter_linear_attn:
+        NV = triton.cdiv(V, BV)
+        grid = (NV, B * HV)
+        fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            o=out,
+            h0=initial_state,
+            ht=initial_state,
+            ssm_state_indices=ssm_state_indices,
+            scale=scale,
+            stride_mixed_qkv_tok=stride_mixed_qkv_tok,
+            stride_a_tok=stride_a_tok,
+            stride_b_tok=stride_b_tok,
+            stride_init_state_token=stride_init_state_token,
+            stride_final_state_token=stride_final_state_token,
+            stride_indices_seq=stride_indices_seq,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
+            SOFTPLUS_THRESHOLD=20.0,
+            USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+    else:
+        from aiter.ops.triton.fla.fused_recurrent import fused_recurrent_gated_delta_rule_packed_decode as aiter_fused_recurrent_gated_delta_rule_packed_decode
+        aiter_fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            scale=scale,
+            initial_state=initial_state,
+            out=out,
+            ssm_state_indices=ssm_state_indices,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
     return out, initial_state
 
 

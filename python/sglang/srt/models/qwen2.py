@@ -51,8 +51,12 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
 )
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import add_prefix, make_layers
+from sglang.srt.utils import add_prefix, make_layers,is_dcu,get_bool_env_var
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
+_is_dcu = is_dcu()
+if _is_dcu:
+    from lightop import split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant
+_use_fused_rms_rotary=get_bool_env_var("SGLANG_USE_FUSED_SPLIT_QKV_RMS_ROTARY_EMBEDDING")
 
 Qwen2Config = None
 
@@ -127,6 +131,16 @@ class Qwen2Attention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
+        self.layer_id = layer_id
+        self.page_size=64
+        if get_global_server_args().kv_cache_dtype == "fp8_e4m3":
+            self.kv_cache_dtype = torch.float8_e4m3fn
+        elif get_global_server_args().kv_cache_dtype == "fp8_e5m2":
+            self.kv_cache_dtype = torch.float8_e5m2
+        elif get_global_server_args().kv_cache_dtype in ("bf16", "bfloat16"):
+            self.kv_cache_dtype = torch.bfloat16
+        else:
+            self.kv_cache_dtype = torch.bfloat16
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -188,8 +202,45 @@ class Qwen2Attention(nn.Module):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        num_tokens = qkv.shape[0]
+        if _is_dcu and _use_fused_rms_rotary:
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            if (cos_sin_cache.device != qkv.device
+                    or cos_sin_cache.dtype != qkv.dtype):
+                cos_sin_cache = cos_sin_cache.to(qkv.device,
+                                                dtype=qkv.dtype,
+                                                non_blocking=True)
+                # Persist the converted cache so we don't re-copy/re-allocate
+                # on every forward when the original buffer starts on CPU.
+                self.rotary_emb.cos_sin_cache = cos_sin_cache
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(self.layer_id)
+            q, k, v = split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant(positions,
+                qkv.contiguous(),
+                self.q_size,
+                self.kv_size,
+                cos_sin_cache,
+                head_dim=self.head_dim,
+                page_size=self.page_size,
+                k_buffer=k_buffer,
+                v_buffer=v_buffer,
+                kv_cache_loc=None,
+                is_neox=True,
+                weight_q=None,
+                weight_k=None,
+                output_dtype=qkv.dtype,
+                kv_cache_dtype=self.kv_cache_dtype,
+                epsilon=1e-5,
+                residual_q=None,
+                residual_k=None,
+                k_scale=None,
+                v_scale=None,
+                )
+            q = q.contiguous().view(num_tokens, self.q_size//self.head_dim, self.head_dim)
+            k = k.contiguous().view(num_tokens, self.kv_size//self.head_dim, self.head_dim)
+            v = v.contiguous().view(num_tokens, self.kv_size//self.head_dim, self.head_dim)
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output

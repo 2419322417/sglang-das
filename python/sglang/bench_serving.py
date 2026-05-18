@@ -899,10 +899,12 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
+    p95_ttft_ms: float
     p99_ttft_ms: float
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
+    p95_tpot_ms: float
     p99_tpot_ms: float
     mean_itl_ms: float
     median_itl_ms: float
@@ -1111,10 +1113,12 @@ def calculate_metrics(
         * 1000,  # ttfts is empty if streaming is not supported by backend
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         std_ttft_ms=np.std(ttfts or 0) * 1000,
+        p95_ttft_ms=np.percentile(ttfts or 0, 95) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
+        p95_tpot_ms=np.percentile(tpots or 0, 95) * 1000,
         p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
         mean_itl_ms=np.mean(itls or 0) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,

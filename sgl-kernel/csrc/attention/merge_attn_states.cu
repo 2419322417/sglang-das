@@ -1,10 +1,14 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#ifdef __HIP_PLATFORM_AMD__
+  #include <hip/hip_bf16.h>
+#endif
+
 #include <algorithm>
 #include <optional>
 
-#include "pytorch_extension_utils.h"
+#include "pytorch_extension_utils_rocm.h"
 
 // Helper functions to convert between different data types
 // (float, half, bfloat16) for the merge attention states kernel.
@@ -26,6 +30,19 @@ inline __device__ void from_float(half& d, float s) {
 inline __device__ void from_float(__nv_bfloat16& d, float s) {
   d = __float2bfloat16(s);
 }
+
+inline void check_shape(const at::Tensor& a, const at::Tensor& b, const char* a_name, const char* b_name) {
+  TORCH_CHECK(a.dim() == b.dim(), a_name, ".dim() != ", b_name, ".dim(). ", a.dim(), " vs ", b.dim());
+  for (int i = 0; i < a.dim(); ++i) {
+    TORCH_CHECK(a.size(i) == b.size(i), a_name, ".size(", i, ") != ", b_name, ".size(", i, ")");
+  }
+}
+
+#define CHECK_SHAPE(a, b) check_shape(a, b, #a, #b)
+
+#define CHECK_EQ(a, b) TORCH_CHECK((a) == (b), "CHECK_EQ(" #a ", " #b ") failed. ", a, " vs ", b)
+
+#define CHECK_GE(a, b) TORCH_CHECK((a) >= (b), "CHECK_GE(" #a ", " #b ") failed. ", a, " vs ", b)
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 template <typename scalar_t, const uint NUM_THREADS>

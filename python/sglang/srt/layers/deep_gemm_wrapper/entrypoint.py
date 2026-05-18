@@ -164,7 +164,7 @@ def gemm_nt_f8f8bf16(
     _sanity_check_input(rhs)
 
     with compile_utils.deep_gemm_execution_hook(m, n, k, num_groups, kernel_type):
-        deep_gemm.fp8_gemm_nt(
+        deep_gemm.fp8_gemm(
             lhs,
             rhs,
             out,

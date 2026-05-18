@@ -441,6 +441,81 @@ void segment_packbits(
 /*
  * From csrc/kvcacheio
  */
+void dcu_align_evict_mask_to_page_size(
+    const at::Tensor seq_lens_ptr,
+    at::Tensor evict_mask_ptr,
+    int64_t page_size,
+    int64_t num_draft_tokens,
+    int64_t bs);
+
+void dcu_create_extend_after_decode_spec_info(
+    const at::Tensor verified_id,
+    const at::Tensor seq_lens,
+    const at::Tensor accept_lens,
+    at::Tensor positions,
+    at::Tensor new_verified_id,
+    int64_t bs);
+void dcu_create_chunked_prefix_cache_kv_indices(
+    at::Tensor req_to_token,
+    const at::Tensor req_pool_indices,
+    const at::Tensor chunk_starts,
+    const at::Tensor chunk_seq_lens,
+    const at::Tensor chunk_cu_seq_lens,
+    at::Tensor chunk_kv_indices,
+    int64_t col_num,
+    int64_t bs);
+
+void dcu_create_flashmla_kv_indices(
+    const at::Tensor& req_to_token,
+    const at::Tensor& req_pool_indices,
+    const at::Tensor& page_kernel_lens,
+    const c10::optional<at::Tensor>& kv_start_idx,
+    at::Tensor& kv_indices,
+    int64_t req_to_token_stride,
+    int64_t kv_indices_stride,
+    int64_t PAGED_SIZE);    
+
+void dcu_assign_extend_cache_locs(
+    const at::Tensor req_pool_indices,
+    const at::Tensor req_to_token,
+    const at::Tensor start_offset,
+    const at::Tensor end_offset,
+    at::Tensor out_cache_loc,
+    int64_t pool_len,
+    int64_t bs);
+
+
+at::Tensor dcu_get_last_loc(
+    const at::Tensor req_to_token,     
+    const at::Tensor req_pool_indices,  
+    const at::Tensor prefix_lens);
+
+void dcu_assign_req_to_token_pool(
+    const at::Tensor req_pool_indices_ptr,
+    at::Tensor req_to_token_ptr,
+    const at::Tensor allocate_lens_ptr,
+    at::Tensor new_allocate_lens,
+    at::Tensor out_cache_loc_ptr,
+    int64_t shape,
+    int64_t bs);
+
+void dcu_alloc_extend_kernel(
+    const at::Tensor pre_lens_ptr,
+    const at::Tensor seq_lens_ptr,
+    const at::Tensor last_loc_ptr,
+    const at::Tensor free_page_ptr,
+    at::Tensor out_indices,
+    int64_t bs,
+    int64_t page_size);
+
+void dcu_alloc_decode_kernel(
+    const at::Tensor seq_lens_ptr,   
+    const at::Tensor last_loc_ptr,    
+    const at::Tensor free_page_ptr,   
+    at::Tensor out_indices, 
+    int64_t bs,          
+    int64_t page_size);
+
 void transfer_kv_per_layer(
     const at::Tensor src_k,
     at::Tensor dst_k,

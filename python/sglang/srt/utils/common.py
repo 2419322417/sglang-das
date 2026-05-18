@@ -157,6 +157,18 @@ def is_npu() -> bool:
 
     return True
 
+@lru_cache(maxsize=1)
+def is_dcu() -> bool:
+    if not is_hip():
+        return False
+    try:
+        props = torch.cuda.get_device_properties(0)
+        gcn_arch = getattr(props, "gcnArchName", "")
+        supported_archs = ["gfx936", "gfx938", "gfx928"]
+        return any(gfx in gcn_arch for gfx in supported_archs)
+    except Exception as e:
+        logger.warning("DCU detection failed (not a DCU or HIP misconfigured): %s", e)
+        return False
 
 @lru_cache(maxsize=1)
 def is_host_cpu_x86() -> bool:
@@ -4069,3 +4081,293 @@ def get_or_create_event_loop():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         return loop
+
+def get_numa_node_count() -> int:
+    """
+    Get the number of NUMA nodes available on the system.
+    Must be called after is_numa_available() is True.
+    Returns:
+        int: The number of NUMA nodes.
+    """
+    libnuma = get_libnuma()
+    return libnuma.numa_max_node() + 1
+
+
+def is_numa_available() -> bool:
+    try:
+        libnuma = get_libnuma()
+        return libnuma.numa_available() >= 0
+    except Exception:
+        return False
+
+
+def get_system_nvgpu_count() -> int:
+    """
+    Get the total number of GPUs in the system (not affected by CUDA_VISIBLE_DEVICES).
+
+    Returns:
+        int: The total number of physical GPUs.
+    """
+    result = subprocess.run(
+        ["nvidia-smi", "--list-gpus"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    gpu_lines = [
+        line
+        for line in result.stdout.strip().split("\n")
+        if line.strip().startswith("GPU")
+    ]
+    return len(gpu_lines)
+
+
+@lru_cache(maxsize=1)
+def get_device_numa_node_cuda(gpu_id: int = 0) -> int:
+    """
+    Retrieve the NUMA node ID of the CPU socket closest to the gpu_id.
+
+    First tries to query nvidia-smi topology. If it returns a single NUMA ID, uses that directly.
+    If it returns multiple NUMA IDs (comma/dash separated), falls back to distributing GPUs
+    evenly across NUMA nodes based on GPU ID intervals.
+
+    For example, with 8 GPUs and 2 NUMA nodes: GPUs 0-3 -> node 0, GPUs 4-7 -> node 1.
+
+    Returns:
+        int: The NUMA node ID (e.g., 0, 1).
+
+    Raises:
+        RuntimeError: If device information cannot be retrieved.
+    """
+
+    physical_device_id = get_physical_device_id(gpu_id)
+
+    # Query NUMA topology from nvidia-smi
+    result = subprocess.run(
+        ["nvidia-smi", "topo", "-C", "-i", str(physical_device_id)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    output_line = result.stdout.strip()
+    prefix = "NUMA IDs of closest CPU:"
+
+    if output_line.startswith(prefix):
+        numa_id_str = output_line[len(prefix) :].strip()
+        if numa_id_str.isdigit():
+            return int(numa_id_str)
+
+    # Fall back: distribute GPUs evenly across NUMA nodes
+    numa_count = get_numa_node_count()
+    gpu_count = get_system_nvgpu_count()
+
+    if gpu_count >= numa_count:
+        gpus_per_numa = gpu_count // numa_count  # >= 1
+        numa_node = physical_device_id // gpus_per_numa  # 0 ~ numa_count - 1
+    else:
+        logger.warning(
+            f"GPU count {gpu_count} is less than NUMA count {numa_count}. Using first NUMA node."
+        )
+        numa_node = 0
+
+    return numa_node
+
+
+def get_numa_node(gpu_id):
+    numa_node = None
+    try:
+        device = get_device()
+        if device == "cuda":
+            numa_node = get_device_numa_node_cuda(gpu_id)
+        else:
+            logger.info(f"Now only supports NVIDIA devices")
+    except Exception as e:
+        logger.error(f"Error: {e}")
+
+    return numa_node
+
+
+@lru_cache(maxsize=1)
+def get_current_device_numa_node_cuda() -> int:
+    """
+    Retrieve the NUMA node ID of the CPU socket closest to the currently active CUDA device.
+    """
+
+    logical_device_id = torch.cuda.current_device()
+    numa_node = get_device_numa_node_cuda(logical_device_id)
+
+    return numa_node
+
+
+def nvgpu_available() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    if torch.version.cuda is None:
+        return False
+    return True
+
+
+def bind_to_closest_numa_node_cuda():
+    """
+    Bind the current process to the NUMA node closest to the active CUDA device.
+
+    Uses `numa` library calls via ctypes to set the CPU affinity of the process.
+    """
+    if is_numa_available() and nvgpu_available():
+        node_id = get_current_device_numa_node_cuda()
+        numa_bind_to_node(node_id)
+# from vllm
+class W8a8GetCacheJSON:
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(W8a8GetCacheJSON, cls).__new__(cls, *args, **kwargs)
+            cls._instance._initialize()
+        return cls._instance
+
+    def _initialize(self):
+        current_folder_path = os.path.dirname(os.path.abspath(__file__))
+        json_folder_path=current_folder_path+'/../../lmslim/configs/w8a8'
+
+        self.triton_json_dir=(os.getenv('TRITON_JSON_DIR', json_folder_path))
+        self.triton_json_dict={}
+        self.triton_moejson_dict={}
+        self.triton_json_list=[]
+        self.weight_shapes=[]
+        self.moe_weight_shapes=[]
+        arch_name = torch.cuda.get_device_properties("cuda").gcnArchName.split(':')[0]
+        arch_cu = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+
+        device_name =arch_name+'_'+str(arch_cu)+'cu'
+        self.device_name=device_name
+        self.topk=1
+        self.quant_method=None
+
+    #析构函数，最后会生成model.json的配置文件
+    def gen_model_json(self,E:Optional[int]=0,block_size:Optional[list]=None):
+        json_dir = os.getenv('LMSLIM_TUNING_JSON', "None")
+        if json_dir != "None" and os.path.exists(json_dir):
+            #生成模型配置文件
+            # logger.info("model_tuning.json is at LMSLIM_TUNING_JSON:%s", json_dir)
+            config = {
+                "layers": {
+                    "linear": {
+                        "shapes": [],
+                        "m_range":"None",
+                    },
+                    "moe": {
+                        "shapes": [],
+                        "m_range": "None",
+                        "topk": self.topk
+                    }
+                },
+                "quantization_config": {
+                    "quant_method": self.quant_method,
+                    "weight_block_size": "None"
+                }
+            }
+
+            # 处理 MoE shapes
+            for shape in self.moe_weight_shapes:
+                if len(shape) == 4:  # 假设 MoE shape 是 [N1, N2,K] 格式
+                    moe_config = {
+                        "E": shape[0],
+                        "N1": shape[1],
+                        "N2": shape[2],
+                        "K": shape[3],      # 默认值
+                    }
+                    config["layers"]["moe"]["shapes"].append(moe_config)
+
+            for shape in self.weight_shapes:
+                config["layers"]["linear"]["shapes"].append(shape)
+
+            if block_size is not None:
+                config["quantization_config"]["weight_block_size"]=block_size
+
+            with open(json_dir+"/model.json", 'w') as f:
+                json.dump(config, f, indent=4)
+        # else:
+        #     logger.info("LMSLIM_TUNING_JSON is not set")
+
+    def getspec_config(self,configs_dict,M,N,K):
+        if f"{M}_{N}_{K}" in configs_dict:
+            return configs_dict[f"{M}_{N}_{K}"]
+        else:
+            return None
+
+    def get_triton_cache(self,file_path,n,k):
+        #在非tuning的时候使用，当文件不存在则直接返回none
+        cache_json_file=file_path
+
+        if os.path.exists(file_path):
+        #try:
+            with open(cache_json_file, 'r') as file:
+                cachedata = json.load(file)
+        else:
+            return None
+
+        #把所有的cache解析成key:config的形式：[M_N_K]:[config]
+        configs_dict={}
+        for key, value in cachedata.items():
+            for sub_key, sub_value in value.items():
+                configs_key= f"{sub_key}_{key}"
+                configs_dict[configs_key]=sub_value
+        return configs_dict
+
+    def get_w8a8json_name(self,n,k):
+        return self.triton_json_dir+f"/W8A8_{n}_{k}_{self.device_name}.json"
+
+    def get_blockint8_triton_cache(self,file_path,n,k,block_n,block_k):
+        cache_json_file=file_path
+
+        if os.path.exists(file_path):
+        #try:
+            with open(cache_json_file, 'r') as file:
+                cachedata = json.load(file)
+        else:
+            return None
+
+        #把所有的cache解析成key:config的形式：[M_N_K]:[config]
+        configs_dict={}
+        for key, value in cachedata.items():
+            for sub_key, sub_value in value.items():
+                configs_key= f"{sub_key}_{key}"
+                configs_dict[configs_key]=sub_value
+        return configs_dict
+
+    def get_blockint8json_name(self,n,k,block_n,block_k):
+        return self.triton_json_dir+f"/linear_{n}_{k}_block[{block_n},{block_k}]_{self.device_name}.json"
+
+    def get_moeint8json_name(self,E,N1,N2,K,TOPK,
+                             block_size:Optional[list]=None,use_int4_w4a8:Optional[bool]=False):
+        if use_int4_w4a8:
+            if block_size is not None:
+                return self.triton_json_dir+f"/MOE_W4A8INT8[{block_size[0]},{block_size[1]}]_E={E}_N1={N1}_N2={N2}_K={K}_TOPK{TOPK}_{self.device_name}.json"
+            else:
+                return self.triton_json_dir+f"/MOE_W4A8INT8_E={E}_N1={N1}_N2={N2}_K={K}_TOPK{TOPK}_{self.device_name}.json"
+        else:
+            if block_size is not None:
+                return self.triton_json_dir+f"/MOE_BLOCKINT8[{block_size[0]},{block_size[1]}]_E={E}_N1={N1}_N2={N2}_K={K}_TOPK{TOPK}_{self.device_name}.json"
+            else:
+                return self.triton_json_dir+f"/MOE_W8A8INT8_E={E}_N1={N1}_N2={N2}_K={K}_TOPK{TOPK}_{self.device_name}.json"
+
+    def get_moeint8_triton_cache(self,file_path,E,N1,N2,K,TOPK):
+        cache_json_file=file_path
+
+        if os.path.exists(file_path):
+        #try:
+            with open(cache_json_file, 'r') as file:
+                cachedata = json.load(file)
+        else:
+            return None
+
+        #把所有的cache解析成key:config的形式：[M_N_K]:[config1,config2]
+        configs_dict={}
+        for key, value in cachedata.items():
+            for sub_key, sub_value in value.items():
+                configs_key= f"{sub_key}_{key}"
+                configs_dict[configs_key]=sub_value
+
+        return configs_dict

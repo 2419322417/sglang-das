@@ -60,10 +60,8 @@ sources = [
 cxx_flags = ["-O3"]
 libraries = ["hiprtc", "amdhip64", "c10", "torch", "torch_python"]
 extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", f"-L/usr/lib/{arch}-linux-gnu"]
-
 default_target = "gfx942"
 amdgpu_target = os.environ.get("AMDGPU_TARGET", default_target)
-
 if torch.cuda.is_available():
     try:
         amdgpu_target = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
@@ -86,8 +84,8 @@ fp8_macro = (
 # - gfx942 (MI300/MI325): LDS is typically 64KB per workgroup -> keep dynamic smem <= ~48KB
 #   (leaves room for static shared allocations in the kernel).
 # - gfx95x (MI350): LDS is larger (e.g. 160KB per CU) -> allow the original 128KB dynamic smem.
-topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target == "gfx942" else 32 * 1024 * 4
-
+#topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target == "gfx942" else 32 * 1024 * 4
+topk_dynamic_smem_bytes = 48 * 1024 if amdgpu_target in ["gfx942", "gfx938"] else 32 * 1024 * 4
 hipcc_flags = [
     "-DNDEBUG",
     f"-DOPERATOR_NAMESPACE={operator_namespace}",

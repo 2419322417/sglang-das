@@ -1,0 +1,230 @@
+from flash_attn import (
+    flash_attn_varlen_func as flash_attn_varlen_func_interface,
+    flash_attn_with_kvcache as flash_attn_with_kvcache_interface,
+    vllm_flash_attn_varlen_func as vllm_flash_attn_varlen_func_interface,
+    vllm_flash_attn_with_kvcache as vllm_flash_attn_with_kvcache_interface,
+)
+from typing import Optional, Union
+from sglang.srt.utils import is_dcu
+
+import torch
+
+_SERVER_ARGS = None
+IS_SLIMQUANT_W4A8 = None
+IS_KVCACHE_FP8_E4M3 = None
+
+
+def is_nmz_fp8(dtype: torch.dtype) -> bool:
+    if is_dcu():
+        props = torch.cuda.get_device_properties(0)
+        gcn_arch = getattr(props, "gcnArchName", "")
+        if "gfx938" in gcn_arch and (dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2):
+            return True
+    return False
+
+@torch._dynamo.disable()
+def flash_attn_with_kvcache(
+    q,
+    k_cache,
+    v_cache,
+    k=None,
+    v=None,
+    qv=None,
+    rotary_cos=None,
+    rotary_sin=None,
+    cache_seqlens: Optional[Union[int, torch.Tensor]] = None,
+    cache_batch_idx: Optional[torch.Tensor] = None,
+    cache_leftpad: Optional[torch.Tensor] = None,
+    page_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k_new: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    rotary_seqlens: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite context window
+    attention_chunk: Optional[int] = None,
+    softcap=0.0,  # 0.0 means deactivated
+    rotary_interleaved=True,
+    scheduler_metadata=None,
+    num_splits=0,  # Can be tuned for speed
+    pack_gqa=None,  # Can be tuned for speed
+    sm_margin=0,  # Can be tuned if some SMs are used for communication
+    return_softmax_lse=False,
+    sinks=None,
+    ver=3,
+):
+    k_cache = k_cache.to(q.dtype) if not is_nmz_fp8(k_cache.dtype) else k_cache
+    v_cache = v_cache.to(q.dtype) if not is_nmz_fp8(k_cache.dtype) else v_cache
+    return flash_attn_with_kvcache_interface(
+            q=q.contiguous().view(-1, max_seqlen_q, q.shape[-2], q.shape[-1]),
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=page_table,
+            cache_seqlens=cache_seqlens,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            return_softmax_lse=return_softmax_lse,
+            num_splits=num_splits,
+        )
+
+def vllm_flash_attn_with_kvcache(
+    q,
+    k_cache,
+    v_cache,
+    k=None,
+    v=None,
+    qv=None,
+    rotary_cos=None,
+    rotary_sin=None,
+    cache_seqlens: Optional[Union[int, torch.Tensor]] = None,
+    cache_batch_idx: Optional[torch.Tensor] = None,
+    cache_leftpad: Optional[torch.Tensor] = None,
+    page_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k_new: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    # max_seqlen_k: Optional[int] = 0,
+    rotary_seqlens: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite context window
+    attention_chunk: Optional[int] = None,
+    softcap=0.0,  # 0.0 means deactivated
+    rotary_interleaved=True,
+    scheduler_metadata=None,
+    num_splits=0,  # Can be tuned for speed
+    pack_gqa=None,  # Can be tuned for speed
+    sm_margin=0,  # Can be tuned if some SMs are used for communication
+    return_softmax_lse=False,
+    sinks=None,
+    ver=3,
+):
+    
+    return vllm_flash_attn_with_kvcache_interface(
+            q=q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            block_table=page_table,
+            cache_seqlens=cache_seqlens,
+            softmax_scale=softmax_scale,
+            # max_seqlen_k=max_seqlen_k,
+            causal=causal,
+            window_size=window_size,
+            softcap=softcap,
+            return_softmax_lse=return_softmax_lse,
+            num_splits=num_splits,
+        )
+
+def flash_attn_varlen_func(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q=None,
+    max_seqlen_k=None,
+    seqused_q=None,
+    seqused_k=None,
+    page_table=None,
+    softmax_scale=None,
+    causal=False,
+    qv=None,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+    window_size=(-1, -1),
+    attention_chunk=0,
+    softcap=0.0,
+    num_splits=1,
+    pack_gqa=None,
+    sm_margin=0,
+    return_softmax_lse=False,
+    sinks=None,
+    ver=3,
+
+):
+    global _SERVER_ARGS, IS_SLIMQUANT_W4A8, IS_KVCACHE_FP8_E4M3
+
+    if IS_KVCACHE_FP8_E4M3 is None:
+        from sglang.srt.server_args import get_global_server_args
+
+        _SERVER_ARGS = get_global_server_args()
+        IS_SLIMQUANT_W4A8 = (_SERVER_ARGS.quantization == "slimquant_w4a8_marlin")
+        IS_KVCACHE_FP8_E4M3 = (_SERVER_ARGS.kv_cache_dtype == "fp8_e4m3")
+
+    if is_nmz_fp8(k.dtype) and not IS_SLIMQUANT_W4A8 and not IS_KVCACHE_FP8_E4M3:
+        q_descale = torch.ones_like(k_descale)
+        return flash_attn_varlen_func_interface(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                causal=causal,
+                return_attn_probs=return_softmax_lse,
+                softcap=softcap,
+            )
+
+    return flash_attn_varlen_func_interface(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        return_attn_probs=return_softmax_lse,
+        softcap=softcap,
+    )
+
+def vllm_flash_attn_varlen_func(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    max_seqlen_q,
+    seqused_k,
+    max_seqlen_k,
+    softmax_scale,
+    causal,
+    window_size,
+    block_table,
+    fa_version,
+    q_descale,
+    k_descale,
+    v_descale,
+):
+    return vllm_flash_attn_varlen_func_interface(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        seqused_k=seqused_k,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+        fa_version=fa_version,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+    )

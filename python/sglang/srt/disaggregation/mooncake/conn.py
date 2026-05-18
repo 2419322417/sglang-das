@@ -13,6 +13,9 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
+import requests
+from sglang.srt.utils import get_bool_env_var
+import zmq
 
 from sglang.srt.disaggregation.base.conn import KVArgs, KVPoll, StateType
 from sglang.srt.disaggregation.common.conn import (
@@ -58,6 +61,7 @@ class KVTransferError(Exception):
         return f"KVTransferError(bootstrap_room={self.bootstrap_room}): {self.failure_reason}"
 
 
+_kv_layout_dcu_fa = get_bool_env_var("SGLANG_KV_LAYOUT_DCU_FA", default="true")
 # prefill
 @dataclasses.dataclass
 class TransferKVChunk:
@@ -762,9 +766,9 @@ class MooncakeKVManager(CommonKVManager):
         Sends KV cache slices from this Prefill rank to a target Decode rank,
         supporting generic M-to-N TP size configurations.
 
-        NOTE: This implementation calls the transfer engine for each token slot within
-        each page to ensure correctness for any page_size and head-slicing configuration.
-        This may introduce performance overhead (increased TTFT) for long sequences.
+        NOTE:
+        - Non-FA layout: expand per token slot within each page.
+        - _kv_layout_dcu_fa layout: transfer one contiguous head slice per page.
         """
         # Extract configuration
         local_tp_rank_in_group = self.kv_args.engine_rank % self.attn_tp_size
@@ -780,9 +784,15 @@ class MooncakeKVManager(CommonKVManager):
 
         src_heads_per_rank = max(1, total_kv_heads // self.attn_tp_size)
         dst_heads_per_rank = max(1, total_kv_heads // dst_attn_tp_size)
-        bytes_per_head_slice_to_send = (
-            dst_kv_item_len // page_size // dst_heads_per_rank
-        )
+
+        if _kv_layout_dcu_fa:
+            # FA: bytes of one head slice in one whole page
+            bytes_per_head_to_send = dst_kv_item_len // dst_heads_per_rank
+        else:
+            # Non-FA: bytes of one head slice in one token slot
+            bytes_per_head_slice_to_send = (
+                dst_kv_item_len // page_size // dst_heads_per_rank
+            )
 
         # GQA replication: how many prefill ranks share the same KV head
         src_replication = max(1, self.attn_tp_size // total_kv_heads)
@@ -797,10 +807,34 @@ class MooncakeKVManager(CommonKVManager):
                 unique_head_idx * src_heads_per_rank
             ) % dst_heads_per_rank
         else:
-            # Send KVCache from 1 prefill instance to multiple decode instances
-            src_head_start_offset = (
-                dst_tp_rank_in_group * dst_heads_per_rank
-            ) % src_heads_per_rank
+            # Send KVCache from 1 prefill instance to multiple decode instances.
+            # Use contiguous replica-aware mapping to match TP KV-head replication layout.
+            ranks_per_prefill_rank = dst_attn_tp_size // self.attn_tp_size
+            group_start = local_tp_rank_in_group * ranks_per_prefill_rank
+            local_dst_rank = dst_tp_rank_in_group - group_start
+            total_requested_heads = ranks_per_prefill_rank * dst_heads_per_rank
+
+            if (
+                ranks_per_prefill_rank <= 0
+                or local_dst_rank < 0
+                or local_dst_rank >= ranks_per_prefill_rank
+                or src_heads_per_rank <= 0
+                or total_requested_heads % src_heads_per_rank != 0
+            ):
+                # Fallback for unexpected topology/input mismatch.
+                src_head_start_offset = (
+                    dst_tp_rank_in_group * dst_heads_per_rank
+                ) % src_heads_per_rank
+            else:
+                replicas_per_src_head = total_requested_heads // src_heads_per_rank
+                src_head_start_offset = (
+                    local_dst_rank * dst_heads_per_rank
+                ) // replicas_per_src_head
+                src_head_start_offset = min(
+                    src_head_start_offset,
+                    max(0, src_heads_per_rank - dst_heads_per_rank),
+                )
+
             num_heads_to_send = dst_heads_per_rank
             dst_head_start_offset = 0
 
@@ -808,45 +842,80 @@ class MooncakeKVManager(CommonKVManager):
             self.get_mha_kv_ptrs_with_pp(self.kv_args.kv_data_ptrs, dst_kv_ptrs)
         )
 
-        # Calculate precise byte offset and length for the sub-slice within the token
-        src_head_slice_offset = src_head_start_offset * bytes_per_head_slice_to_send
-        dst_head_slice_offset = dst_head_start_offset * bytes_per_head_slice_to_send
-        heads_bytes_per_token_to_send = num_heads_to_send * bytes_per_head_slice_to_send
-
-        # Sanity check: The data sub-slice to be sent should fit into the dst buffer.
-        # This means heads_bytes_per_token_to_send <= (dst_kv_item_len // page_size)
-        if heads_bytes_per_token_to_send > (dst_kv_item_len // page_size):
-            logger.error(
-                f"[{mooncake_session_id}] slice size ({heads_bytes_per_token_to_send}) exceeds "
-                f"target token slot size ({dst_kv_item_len // page_size})"
+        # Calculate offsets / transfer sizes
+        if _kv_layout_dcu_fa:
+            # FA layout: contiguous head slice on one whole page
+            src_head_slice_offset = src_head_start_offset * bytes_per_head_to_send
+            dst_head_slice_offset = dst_head_start_offset * bytes_per_head_to_send
+            heads_bytes_to_send = num_heads_to_send * bytes_per_head_to_send
+        else:
+            # Non-FA layout: head slice within one token slot
+            src_head_slice_offset = (
+                src_head_start_offset * bytes_per_head_slice_to_send
             )
-            return -1
+            dst_head_slice_offset = (
+                dst_head_start_offset * bytes_per_head_slice_to_send
+            )
+            heads_bytes_per_token_to_send = (
+                num_heads_to_send * bytes_per_head_slice_to_send
+            )
+
+        # Sanity check
+        if _kv_layout_dcu_fa:
+            if heads_bytes_to_send > dst_kv_item_len:
+                logger.error(
+                    f"[{mooncake_session_id}] FA slice size ({heads_bytes_to_send}) exceeds "
+                    f"target page size ({dst_kv_item_len})"
+                )
+                return -1
+        else:
+            if heads_bytes_per_token_to_send > (dst_kv_item_len // page_size):
+                logger.error(
+                    f"[{mooncake_session_id}] slice size ({heads_bytes_per_token_to_send}) exceeds "
+                    f"target token slot size ({dst_kv_item_len // page_size})"
+                )
+                return -1
 
         prefill_page_indices = prefill_kv_indices.reshape(-1, 1).astype(np.int64)
         decode_page_indices = dst_kv_indices.reshape(-1, 1).astype(np.int64)
-        tokens_per_page = np.arange(page_size, dtype=np.int64).reshape(1, -1)
-        bytes_per_token_on_prefill = src_kv_item_len // page_size
-        bytes_per_token_on_decode = dst_kv_item_len // page_size
-        src_token_slot_offsets = (
-            tokens_per_page * bytes_per_token_on_prefill + src_head_slice_offset
-        )
-        dst_token_slot_offsets = (
-            tokens_per_page * bytes_per_token_on_decode + dst_head_slice_offset
-        )
+
+        if not _kv_layout_dcu_fa:
+            tokens_per_page = np.arange(page_size, dtype=np.int64).reshape(1, -1)
+            bytes_per_token_on_prefill = src_kv_item_len // page_size
+            bytes_per_token_on_decode = dst_kv_item_len // page_size
+
+            src_token_slot_offsets = (
+                tokens_per_page * bytes_per_token_on_prefill + src_head_slice_offset
+            )
+            dst_token_slot_offsets = (
+                tokens_per_page * bytes_per_token_on_decode + dst_head_slice_offset
+            )
 
         def process_layer_tp_aware(src_layer_ptr, dst_layer_ptr):
             src_page_base_addrs = src_layer_ptr + prefill_page_indices * src_kv_item_len
             dst_page_base_addrs = dst_layer_ptr + decode_page_indices * dst_kv_item_len
-            src_slice_addrs = src_page_base_addrs + src_token_slot_offsets
-            dst_slice_addrs = dst_page_base_addrs + dst_token_slot_offsets
 
-            src_addr_list = src_slice_addrs.reshape(-1).tolist()
-            if not src_addr_list:
-                # Nothing to transfer for this layer.
-                return 0
-            dst_addr_list = dst_slice_addrs.reshape(-1).tolist()
-            total_slices = len(src_addr_list)
-            length_list = [heads_bytes_per_token_to_send] * total_slices
+            if _kv_layout_dcu_fa:
+                # One transfer per page
+                src_slice_addrs = src_page_base_addrs + src_head_slice_offset
+                dst_slice_addrs = dst_page_base_addrs + dst_head_slice_offset
+
+                src_addr_list = src_slice_addrs.reshape(-1).tolist()
+                if not src_addr_list:
+                    return 0
+                dst_addr_list = dst_slice_addrs.reshape(-1).tolist()
+                length_list = [heads_bytes_to_send] * len(src_addr_list)
+            else:
+                # One transfer per token slot
+                src_slice_addrs = src_page_base_addrs + src_token_slot_offsets
+                dst_slice_addrs = dst_page_base_addrs + dst_token_slot_offsets
+
+                src_addr_list = src_slice_addrs.reshape(-1).tolist()
+                if not src_addr_list:
+                    return 0
+                dst_addr_list = dst_slice_addrs.reshape(-1).tolist()
+                length_list = [heads_bytes_per_token_to_send] * len(src_addr_list)
+
             return self.engine.batch_transfer_sync(
                 mooncake_session_id, src_addr_list, dst_addr_list, length_list
             )

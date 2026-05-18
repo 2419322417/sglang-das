@@ -51,6 +51,7 @@ class DraftBackendFactory:
                 else self._create_triton_decode_backend
             ),
             "flashmla": self._create_flashmla_decode_backend,
+            "dcu_mla": self._create_dcumla_decode_backend,
             "trtllm_mha": self._create_trtllm_mha_decode_backend,
             "trtllm_mla": self._create_trtllm_mla_decode_backend,
             "tokenspeed_mla": self._create_tokenspeed_mla_decode_backend,
@@ -78,6 +79,7 @@ class DraftBackendFactory:
                 else self._create_triton_prefill_backend
             ),
             "flashmla": self._create_flashmla_prefill_backend,
+            "dcu_mla": self._create_dcumla_prefill_backend,
             "trtllm_mha": self._create_trtllm_mha_prefill_backend,
             "trtllm_mla": self._create_trtllm_mla_prefill_backend,
             "tokenspeed_mla": self._create_tokenspeed_mla_prefill_backend,
@@ -174,6 +176,15 @@ class DraftBackendFactory:
         )
 
         return FlashMLAMultiStepDraftBackend(
+            self.draft_model_runner, self.topk, self.speculative_num_steps
+        )
+    
+    def _create_dcumla_decode_backend(self):
+        from sglang.srt.layers.attention.dcu_mla_backend import (
+            DCUMLAMultiStepDraftBackend,
+        )
+
+        return DCUMLAMultiStepDraftBackend(
             self.draft_model_runner, self.topk, self.speculative_num_steps
         )
 
@@ -310,6 +321,14 @@ class DraftBackendFactory:
         return AscendAttnBackend(self.draft_model_runner)
 
     def _create_flashmla_prefill_backend(self):
+        from sglang.srt.layers.attention.flashattention_backend import (
+            FlashAttentionBackend,
+        )
+
+        return FlashAttentionBackend(self.draft_model_runner, skip_prefill=False)
+
+    
+    def _create_dcumla_prefill_backend(self):
         logger.warning(
             "flashmla prefill backend is not yet supported for draft extend."
         )

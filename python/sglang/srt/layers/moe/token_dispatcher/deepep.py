@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Union
 
 from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.environ import envs
+from sglang.srt.distributed import get_moe_expert_parallel_rank, get_moe_expert_parallel_world_size
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.dp_attention import get_is_extend_in_batch
@@ -33,7 +34,9 @@ from sglang.srt.utils import (
     is_npu,
     load_json_config,
 )
-
+from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lmslim.layers.gemm.fp8_utils import per_token_quant_fp8
+from sglang.srt.server_args import get_global_server_args
 _is_npu = is_npu()
 
 if TYPE_CHECKING:
@@ -61,6 +64,12 @@ import torch
 import torch.distributed as dist
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
+_use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
+_use_marlin_w16a16_moe = get_bool_env_var("SGLANG_USE_MARLIN_W16A16_MOE")
+
+use_groupgemm = get_bool_env_var(
+    "SGLANG_GROUPGEMM", default="true"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -397,22 +406,30 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
     ):
         topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
         topk_ids = topk_ids.to(torch.int64)
-        backend = get_moe_runner_backend()
-        # BF16 dispatch is needed when:
-        #   - cutlass backend (uses different kernel)
-        #   - deep_gemm backend with SGLANG_DEEPEP_BF16_DISPATCH enabled
-        need_bf16_dispatch = backend.is_cutlass() or (
-            backend.is_deep_gemm() and envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
-        )
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and not need_bf16_dispatch:
-            # TODO hard code 128 block quant,use fp8 communication
-            hidden_states = sglang_per_token_group_quant_fp8(
-                hidden_states,
-                128,
-                column_major_scales=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
-                scale_tma_aligned=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
-                scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+        if use_groupgemm:
+            if _use_fp8_w8a8_moe:
+                hidden_states = per_token_quant_fp8(hidden_states)
+            elif _use_marlin_w16a16_moe:
+                pass
+            else:
+                hidden_states = per_token_quant_int8(hidden_states)
+        else:
+            backend = get_moe_runner_backend()
+            # BF16 dispatch is needed when:
+            #   - cutlass backend (uses different kernel)
+            #   - deep_gemm backend with SGLANG_DEEPEP_BF16_DISPATCH enabled
+            need_bf16_dispatch = backend.is_cutlass() or (
+                backend.is_deep_gemm() and envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
             )
+            if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and not need_bf16_dispatch:
+                # TODO hard code 128 block quant,use fp8 communication
+                hidden_states = sglang_per_token_group_quant_fp8(
+                    hidden_states,
+                    128,
+                    column_major_scales=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                    scale_tma_aligned=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                    scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                )
         previous_event = Buffer.capture() if self.async_finish else None
         return hidden_states, topk_ids, topk_weights, previous_event
 
@@ -463,36 +480,57 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         # FIXME: `handle` should be transmitted with tokens from dispatch to combine.
         # However, doing this would incur an unknown synchronization error, but keeping
         # `handle` as a member variable works.
-
         _deepep_precompile_tp_barrier()
-        (
-            recv_x,
-            recv_topk_ids,
-            recv_topk_weights,
-            num_recv_tokens_per_expert,
-            self.handle,
-            event,
-        ) = buffer.dispatch(
-            x,
-            topk_idx=topk_ids,
-            topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
-            config=DeepEPConfig.get_instance().normal_dispatch_config,
-        )
+        if use_groupgemm:
+            (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                num_recv_tokens_per_expert,
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
+                expert_alignment=256 if (get_global_server_args().quantization == "slimquant_marlin" or _use_fp8_w8a8_moe or _use_marlin_w16a16_moe) else 1,
+                config=DeepEPConfig.get_instance().normal_dispatch_config,
+            )
+        else:
+            (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                num_recv_tokens_per_expert,
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
+                expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+                config=DeepEPConfig.get_instance().normal_dispatch_config,
+            )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
             num_recv_tokens_per_expert,
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             num_tokens_per_expert=num_tokens_per_expert,
         )
-
         return (
             recv_x,
             recv_topk_ids,
@@ -508,11 +546,32 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
     ):
 
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter or _is_npu:
-            output = hidden_states
-        else:
-            raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
-
+        #if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter or _is_npu:
+        output = hidden_states
+        # else:
+        #     if hidden_states.shape[0] > 0:
+        #         num_tokens = self.src2dst.shape[0] // self.router_topk
+        #         output = torch.empty(
+        #             (num_tokens, hidden_states.shape[1]),
+        #             device=hidden_states.device,
+        #             dtype=hidden_states.dtype,
+        #         )
+        #         deepep_post_reorder_triton_kernel[(num_tokens,)](
+        #             hidden_states,
+        #             output,
+        #             self.src2dst,
+        #             topk_idx,
+        #             topk_weights,
+        #             self.router_topk,
+        #             hidden_states.shape[1],
+        #             BLOCK_SIZE=512,
+        #         )
+        #     else:
+        #         output = torch.zeros(
+        #             (0, hidden_states.shape[1]),
+        #             device=hidden_states.device,
+        #             dtype=hidden_states.dtype,
+        #         )
         previous_event = Buffer.capture() if self.async_finish else None
         return output, previous_event
 
@@ -660,24 +719,68 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
-        packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
-            buffer.low_latency_dispatch(
-                hidden_states,
-                topk_ids,
-                self.num_max_dispatch_tokens_per_rank,
-                self.num_experts,
-                use_fp8=use_fp8,
-                **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
-                **(
-                    dict(x_global_scale=input_global_scale)
-                    if input_global_scale is not None
-                    else dict()
-                ),
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-                **fp8_deepgemm_scale_opts,
+        if use_groupgemm:
+            if _use_fp8_w8a8_moe:
+                packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                    buffer.low_latency_dispatch(
+                        hidden_states,
+                        topk_ids,
+                        self.num_max_dispatch_tokens_per_rank,
+                        self.num_experts,
+                        quant_type = 2,
+                        fp8_round_scale=False,
+                        async_finish=not self.return_recv_hook,
+                        return_recv_hook=self.return_recv_hook,
+                    )
+                )
+            elif _use_marlin_w16a16_moe:
+                packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                    buffer.low_latency_dispatch(
+                        hidden_states,
+                        topk_ids,
+                        self.num_max_dispatch_tokens_per_rank,
+                        self.num_experts,
+                        quant_type = 0,
+                        fp8_round_scale=False,
+                        async_finish=not self.return_recv_hook,
+                        return_recv_hook=self.return_recv_hook,
+                    )
+                )
+            else:
+                packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                    buffer.low_latency_dispatch(
+                        hidden_states,
+                        topk_ids,
+                        self.num_max_dispatch_tokens_per_rank,
+                        self.num_experts,
+                        quant_type=1,
+                        fp8_round_scale=False,
+                        async_finish=not self.return_recv_hook,
+                        return_recv_hook=self.return_recv_hook,
+                    )
+                )
+        else:
+            packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                buffer.low_latency_dispatch(
+                    hidden_states,
+                    topk_ids,
+                    self.num_max_dispatch_tokens_per_rank,
+                    self.num_experts,
+                    quant_type = 0,
+                    **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+                    **(
+                        dict(x_global_scale=input_global_scale)
+                        if input_global_scale is not None
+                        else dict()
+                    ),
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                    and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                    use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                    and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                )
             )
-        )
         return packed_recv_hidden, self.packed_recv_count, event, hook
 
     def combine_a(
@@ -740,19 +843,31 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         with ctx:
             _deepep_precompile_tp_barrier()
-            combined_hidden_states, event, hook = buffer.low_latency_combine(
-                x=hidden_states,
-                topk_idx=topk_ids,
-                topk_weights=topk_weights,
-                handle=self.handle,
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-                **overlap_args_dict,
-            )
-
+            if use_groupgemm:
+                combined_hidden_states, event, hook = buffer.low_latency_combine(
+                    x=hidden_states,
+                    topk_idx=topk_ids,
+                    topk_weights=topk_weights,
+                    handle=self.handle,
+                    zero_copy=False,
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    **overlap_args_dict,
+                )
+            else:
+                combined_hidden_states, event, hook = buffer.low_latency_combine(
+                    x=hidden_states,
+                    topk_idx=topk_ids,
+                    topk_weights=topk_weights,
+                    handle=self.handle,
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    **overlap_args_dict,
+                )
         self.packed_recv_count = self.handle = None
         return combined_hidden_states, event, hook
 
+    @torch._dynamo.disable()
     def _get_buffer(self):
         DeepEPBuffer.set_dispatch_mode_as_low_latency()
         return DeepEPBuffer.get_deepep_buffer(
@@ -839,6 +954,7 @@ class DeepEPDispatcher(BaseDispatcher):
         )
         self._dispatch_intermediate_state = inner_state
 
+    @torch._dynamo.disable()
     def dispatch_b(self):
         self._update_stage(_Stage.AFTER_DISPATCH_A, _Stage.AFTER_DISPATCH_B)
         inner_state = self._dispatch_intermediate_state
@@ -866,6 +982,7 @@ class DeepEPDispatcher(BaseDispatcher):
         )
         self._combine_intermediate_state = inner_state
 
+    @torch._dynamo.disable()
     def combine_b(self):
         self._update_stage(_Stage.AFTER_COMBINE_A, _Stage.INITIAL)
         inner_state = self._combine_intermediate_state

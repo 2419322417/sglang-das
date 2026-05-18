@@ -7,6 +7,7 @@ from torch.nn.parameter import Parameter
 
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
+from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.layers.parameter import ChannelQuantScaleParameter, ModelWeightParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -25,8 +26,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     input_to_float8,
     normalize_e4m3fn_to_e4m3fnuz,
 )
-from sglang.srt.utils import set_weight_attrs
-
+from sglang.srt.utils import set_weight_attrs, is_hip, is_dcu, set_weight_attrs, get_bool_env_var
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
@@ -34,7 +34,13 @@ if TYPE_CHECKING:
     )
 
 _is_fp8_fnuz = is_fp8_fnuz()
+_is_dcu = is_dcu()
+_use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
 
+try:
+    from lmslim.layers.fused_moe.fuse_moe_w4a8_marlin import fused_experts_impl_w4a8_marlin
+except Exception:
+    print("INFO: Please install lmslim if you want to infer the quantitative model of moe.\n")
 
 class W8A8Fp8Config(QuantizationConfig):
     """Config class for W8A8 FP8 Quantization.
@@ -207,6 +213,7 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: W8A8Fp8Config):
         self.quant_config = quant_config
+        self.use_deepep = get_moe_a2a_backend().is_deepep()
 
     def create_weights(
         self,
@@ -271,14 +278,86 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
-        layer.w13_weight_scale = Parameter(
-            layer.w13_weight_scale.data, requires_grad=False
-        )
-        layer.w2_weight_scale = Parameter(
-            layer.w2_weight_scale.data, requires_grad=False
-        )
+        if _is_dcu and _use_fp8_w8a8_moe:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_shape = w1.shape
+            w2_shape = w2.shape
+            if (w1.is_cuda and w2.is_cuda):
+                if w1.dim() != 3 or w2.dim() != 3 or w1.size(0) != w2.size(
+                    0):
+                    raise RuntimeError("Unexpected MoE weight shapes")
+                twoN, K = w1.size(1), w1.size(2)
+                if w2.size(1) != K:
+                    raise RuntimeError("Unexpected MoE w2 layout")
+                N = w2.size(2)
+                if twoN != 2 * N:
+                    raise RuntimeError("Unexpected MoE hidden dims")
+                if (K % 16 != 0 or K % 32 != 0 or N % 16 != 0
+                    or twoN % 32 != 0):
+                    raise RuntimeError("Marlin packing requires alignment")
+
+                from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+                    w8a8_2_marlin_weight, weight8bit_nt_kpack2_marlin,weight8bit_nt_kpack2_marlin1)
+
+                def _pack_per_expert(weight: torch.Tensor) -> torch.Tensor:
+                    num_experts = weight.shape[0]
+                    for i in range(num_experts):
+                        new_expert = w8a8_2_marlin_weight(
+                            weight[i]).contiguous()
+                        weight.data[i].view(-1).copy_(new_expert.view(-1))
+                    weight = weight.reshape((-1,) + new_expert.shape)
+
+                    return weight
+
+                def _pack_per_expert_deepep(weight: torch.Tensor) -> torch.Tensor:
+                    num_experts = weight.shape[0]
+                    for i in range(num_experts):
+                        if is_moe_prefill() :
+                            new_expert = weight8bit_nt_kpack2_marlin(
+                                weight[i]).contiguous()
+                        else:
+                            new_expert = weight8bit_nt_kpack2_marlin1(
+                                weight[i]).contiguous()
+                        weight.data[i].view(-1).copy_(new_expert.view(-1))
+                    weight = weight.reshape((-1,) + new_expert.shape)
+                    return weight
+
+                with torch.no_grad():
+                    if self.use_deepep:
+                        w1_packed = _pack_per_expert_deepep(w1)
+                        w2_packed = _pack_per_expert_deepep(w2)
+                    else:
+                        w1_packed = _pack_per_expert(w1)
+                        w2_packed = _pack_per_expert(w2)
+
+                    new_w1 = Parameter(w1_packed, requires_grad=False)
+                    new_w2 = Parameter(w2_packed, requires_grad=False)
+
+                    if hasattr(w1, "__dict__"):
+                        for k, v in w1.__dict__.items():
+                            setattr(new_w1, k, v)
+                    if hasattr(w2, "__dict__"):
+                        for k, v in w2.__dict__.items():
+                            setattr(new_w2, k, v)
+
+                    setattr(new_w1, "_w8a8_fp8_packed", True)
+                    setattr(new_w1, "w1_shape", w1_shape)
+                    setattr(new_w2, "_w8a8_fp8_packed", True)
+                    setattr(new_w2, "w2_shape", w2_shape)
+
+                    layer.w13_weight = new_w1
+                    layer.w2_weight = new_w2
+                    layer._w8a8_fp8_packed = True
+        else:
+            layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
+            layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
+                layer.w13_weight_scale.data, requires_grad=False
+            )
+            layer.w2_weight_scale = Parameter(
+                layer.w2_weight_scale.data, requires_grad=False
+            )
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
@@ -302,7 +381,58 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
+        bias: Optional[torch.Tensor] = None,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
     ) -> CombineInput:
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+        moe_runner_config = self.moe_runner_config
 
-        quant_info = self.get_triton_quant_info(layer)
-        return self.runner.run(dispatch_output, quant_info)
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+        if _is_dcu and _use_fp8_w8a8_moe:
+            if (getattr(layer.w13_weight, "_w8a8_fp8_packed", False)
+                or getattr(layer.w2_weight, "_w8a8_fp8_packed", False)):
+                topk_weights, topk_ids, _ = topk_output
+                use_prequant_input = i_q is not None and i_s is not None
+                if moe_runner_config.apply_router_weight_on_input:
+                    assert topk_weights.dim() == 2, "`topk_weights` should be (num_tokens, topk)"
+                    _, tk = topk_weights.shape
+                    assert tk == 1, "DCU marlin path: apply_router_weight_on_input requires topk=1"
+                    x = x * topk_weights.to(x.dtype)
+                    topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+                    # Router-weighted input no longer matches precomputed rms-quant activations.
+                    use_prequant_input = False
+                from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe_fp8_w8a8
+                origin_w1_shape = getattr(layer.w13_weight, "w1_shape", None)
+                origin_w2_shape = getattr(layer.w2_weight, "w2_shape", None)
+                output = fused_moe_fp8_w8a8(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    w1_scale=layer.w13_weight_scale,
+                    w2_scale=layer.w2_weight_scale,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    global_num_experts=self.moe_runner_config.num_experts,
+                    inplace=True,
+                    origin_w1_shape=origin_w1_shape,
+                    origin_w2_shape=origin_w2_shape,
+                    routed_scaling_factor=moe_runner_config.routed_scaling_factor,
+                    bias=bias,
+                    hidden_states_fp8_input=i_q if use_prequant_input else None,
+                    hidden_states_scale_fp8_input=i_s if use_prequant_input else None,
+                )
+                return StandardCombineInput(hidden_states=output)
+        else:
+            quant_info = TritonMoeQuantInfo(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                use_fp8_w8a8=True,
+                per_channel_quant=True,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a13_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+            )
+            return self.runner.run(dispatch_output, quant_info)

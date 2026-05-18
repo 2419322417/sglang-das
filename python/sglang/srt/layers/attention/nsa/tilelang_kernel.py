@@ -6,7 +6,7 @@ import tilelang.language as T
 import torch
 
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
-from sglang.srt.utils import is_gfx95_supported, is_hip
+from sglang.srt.utils import is_gfx95_supported, is_hip, is_dcu
 
 tilelang.set_log_level("WARNING")
 
@@ -23,7 +23,7 @@ elif hasattr(tilelang.PassConfigKey, "TL_ENABLE_FAST_MATH"):
 _is_hip = is_hip()
 _is_gfx95_supported = is_gfx95_supported()
 _is_fp8_fnuz = is_fp8_fnuz()
-
+_is_dcu = is_dcu()
 BF16 = "bfloat16"
 FP8 = "float8_e4m3fnuz" if _is_fp8_fnuz else "float8_e4m3"
 FP32 = "float32"
@@ -138,10 +138,14 @@ def act_quant(
     else:
         y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = x.new_empty(*x.size()[:-1], N // block_size, dtype=torch.float32)
-    kernel = act_quant_kernel(N, round_scale=scale_fmt is not None)
-    kernel(x.view(-1, N), y.view(-1, N), s.view(-1, N // block_size))
+    if _is_dcu:
+        from lightop import op
+        use_ue8m0 = scale_fmt is not None
+        op.per_token_group_quant_fp8(y, x, s, block_size, 1e-5, use_ue8m0)
+    else:
+        kernel = act_quant_kernel(N, round_scale=scale_fmt is not None)
+        kernel(x.view(-1, N), y.view(-1, N), s.view(-1, N // block_size))
     return y, s
-
 
 @tilelang.jit(out_idx=[4], pass_configs=pass_configs)
 def fp8_index_kernel(h: int, d: int, clear_accum=True):

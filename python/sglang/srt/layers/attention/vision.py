@@ -23,6 +23,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_musa,
+    is_dcu,
     is_npu,
     is_xpu,
     print_info_once,
@@ -37,6 +38,7 @@ _is_musa = is_musa()
 _is_npu = is_npu()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
+_is_dcu = is_dcu()
 
 if _is_cuda:
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
@@ -48,6 +50,9 @@ if _is_cuda:
 if _is_musa:
     from flash_attn_interface import flash_attn_varlen_func
 
+if _is_dcu:
+    from sglang.srt.layers.attention.flashattention_interface import flash_attn_varlen_func
+    flash_attn_func = flash_attn_varlen_func
 if _is_npu:
     import torch_npu
 
@@ -387,8 +392,8 @@ class VisionFlash3Attention(nn.Module):
         self,
         **kwargs,
     ):
-        if not (_is_cuda or _is_musa):
-            raise Exception("VisionFlash3Attention is only available for cuda or musa")
+        if not (_is_cuda or _is_musa or _is_dcu):
+            raise Exception("VisionFlash3Attention is only available for cuda or musa or dcu")
         super().__init__()
         use_data_parallel = (
             kwargs["use_data_parallel"] if "use_data_parallel" in kwargs else False

@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from functools import cache
 from typing import Dict, List, Optional, Set, Tuple, Union
-
+from sglang.srt.configs.model_config import ModelConfig
 import numpy as np
 import numpy.typing as npt
 import requests
@@ -123,6 +123,7 @@ class CommonKVManager(BaseKVManager):
         self.enable_all_cp_ranks_for_transfer = (
             envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()
         )
+        self.model_config = ModelConfig.from_server_args(server_args)
 
         # bind zmq socket
         context = zmq.Context()
@@ -453,6 +454,7 @@ class CommonKVManager(BaseKVManager):
         elif (
             num_kv_layers < dst_num_total_layers
             and dst_num_total_layers % num_kv_layers != 0
+            and self.model_config.is_draft_model
         ):
             # Case: Decode has draft model KV while Prefill is deployed without speculative decoding
             # dst_kv_ptrs layout: [K_main..., V_main..., draft_K..., draft_V...]

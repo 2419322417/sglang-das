@@ -1129,6 +1129,9 @@ class ModelConfig:
             "mxfp4",
             "auto-round",
             "quark_int4fp8_moe",
+            "slimquant_w4a8_marlin",
+            "w8a8_int8",
+            "slimquant_marlin",
         ]
         optimized_quantization_methods = [
             "fp8",
@@ -1151,6 +1154,8 @@ class ModelConfig:
             "petit_nvfp4",
             "quark",
             "modelslim",
+            "slimquant_w4a8_marlin",
+            "slimquant_marlin",
         ]
         compatible_quantization_methods = {
             "modelopt_fp8": ["modelopt"],

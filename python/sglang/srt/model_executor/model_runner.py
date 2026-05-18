@@ -244,6 +244,7 @@ MLA_ATTENTION_BACKENDS = [
     "triton",
     "flashmla",
     "cutlass_mla",
+    "dcu_mla",
     "trtllm_mla",
     "tokenspeed_mla",
     "ascend",
@@ -254,11 +255,13 @@ MLA_ATTENTION_BACKENDS = [
 CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS = [
     "flashinfer",
     "fa3",
+    "dcu_mla",
     "fa4",
     "flashmla",
     "cutlass_mla",
     "trtllm_mla",
     "tokenspeed_mla",
+    "dcu_mla",
 ]
 
 TORCH_DTYPE_TO_KV_CACHE_STR = {
@@ -284,7 +287,7 @@ def add_chunked_prefix_cache_attention_backend(backend_name):
 
 
 # Detect stragger ranks in model loading
-UNBALANCED_MODEL_LOADING_TIMEOUT_S = 480  # leave more time for post data processing
+UNBALANCED_MODEL_LOADING_TIMEOUT_S = 3600
 
 
 logger = logging.getLogger(__name__)
@@ -2359,12 +2362,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.kv_cache_dtype = self.dtype
         elif self.server_args.kv_cache_dtype == "fp8_e5m2":
             if _is_hip:  # Using natively supported format
-                self.kv_cache_dtype = fp8_dtype
+                # self.kv_cache_dtype = fp8_dtype
+                self.kv_cache_dtype = torch.float8_e5m2
             else:
                 self.kv_cache_dtype = torch.float8_e5m2
         elif self.server_args.kv_cache_dtype == "fp8_e4m3":
             if _is_hip:  # Using natively supported format
-                self.kv_cache_dtype = fp8_dtype
+                # self.kv_cache_dtype = fp8_dtype
+                self.kv_cache_dtype = torch.float8_e4m3fn
             else:
                 self.kv_cache_dtype = torch.float8_e4m3fn
         elif self.server_args.kv_cache_dtype in ("bf16", "bfloat16"):

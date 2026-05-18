@@ -741,7 +741,10 @@ class SchedulerPPMixin:
     def process_bootstrapped_queue(
         self: Scheduler, bootstrapped_rids: Optional[List[str]]
     ):
-        # finished consensus bootstrapped reqs and prepare the waiting queue
+        # Finished consensus bootstrap requests.
+        # In PP disagg prefill parallel mode, requests may already be enqueued into
+        # waiting_queue before bootstrap notify is done. Here we only advance
+        # bootstrap/transfer states.
         if bootstrapped_rids is not None:
             (
                 good_consensus_bootstrapped_rids,
@@ -754,6 +757,10 @@ class SchedulerPPMixin:
                     + bad_consensus_bootstrapped_rids,
                 )
             )
+
+
+            # if ready_reqs:
+            #     self._try_send_prefill_kv_ready_batch(ready_reqs)
             self.waiting_queue.extend(good_reqs)
             return [[req.rid for req in good_reqs], [req.rid for req in failed_reqs]]
         return None

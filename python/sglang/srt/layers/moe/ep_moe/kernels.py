@@ -16,6 +16,11 @@ if _is_cuda or _is_musa:
     )
 
 import triton.language as tl
+from sglang.srt.utils import get_bool_env_var
+
+use_groupgemm = get_bool_env_var(
+    "SGLANG_GROUPGEMM", default="true"
+)
 
 
 def _get_launch_config_1d(device, numel):
@@ -716,6 +721,39 @@ def post_reorder_triton_kernel(
 
 
 @triton.jit
+def _fwd_kernel_ep_scatter_1_use_groupgemm(
+    num_recv_tokens_per_expert,
+    expert_start_loc,
+    m_indices,
+    num_experts: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    BLOCK_EXPERT_NUM: tl.constexpr,
+):
+    cur_expert = tl.program_id(0)
+
+    offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
+    tokens_per_expert = tl.load(
+        num_recv_tokens_per_expert + offset_cumsum,
+        mask=offset_cumsum < num_experts,
+        other=0,
+    )
+    cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
+    tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
+
+    # cur_expert_start = tl.load(expert_start_loc + cur_expert)
+    # cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
+    #
+    # m_indices_start_ptr = m_indices + cur_expert_start
+    # off_expert = tl.arange(0, BLOCK_E)
+    #
+    # for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
+    #     tl.store(
+    #         m_indices_start_ptr + start_m + off_expert,
+    #         cur_expert,
+    #     )
+
+
+@triton.jit
 def _fwd_kernel_ep_scatter_1(
     num_recv_tokens_per_expert,
     expert_start_loc,
@@ -829,7 +867,106 @@ def _fwd_kernel_ep_scatter_2(
                     )
 
 
+@triton.jit
+def _fwd_kernel_ep_scatter_non_quant(
+    total_token_num,
+    expert_start_loc,
+    recv_x,
+    recv_x_stride0,
+    recv_x_stride1,
+    recv_topk,
+    recv_topk_stride0,
+    recv_topk_stride1,
+    output_tensor,
+    output_tensor_stride0,
+    output_tensor_stride1,
+    output_index,
+    output_index_stride0,
+    output_index_stride1,
+    topk_num: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    HIDDEN_SIZE_PAD: tl.constexpr,
+):
+    start_token_id = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+
+    offs_hidden = tl.arange(0, HIDDEN_SIZE_PAD)
+    mask_hidden = offs_hidden < HIDDEN_SIZE
+
+    for token_id_int32 in range(start_token_id, total_token_num, grid_num):
+        token_id = token_id_int32.to(tl.int32)
+
+        x_ptr = recv_x + token_id * recv_x_stride0 + offs_hidden
+        activation = tl.load(x_ptr, mask=mask_hidden)
+
+        for topk_idx in range(topk_num):
+            expert_id = tl.load(
+                recv_topk + token_id * recv_topk_stride0 + topk_idx
+            )
+            if expert_id >= 0:
+                dest_idx_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
+                dest_idx = dest_idx_int32.to(tl.int64)
+
+                tl.store(
+                    output_index + token_id * output_index_stride0 + topk_idx,
+                    dest_idx_int32,
+                )
+
+                out_ptr = output_tensor + dest_idx * output_tensor_stride0 + offs_hidden
+                tl.store(out_ptr, activation, mask=mask_hidden)
+
 # copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py
+@torch.no_grad()
+def ep_scatter_no_scale(
+    recv_x: torch.Tensor,
+    recv_topk: torch.Tensor,
+    num_recv_tokens_per_expert: torch.Tensor,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    m_indices: torch.Tensor,
+    output_index: torch.Tensor,
+):
+    num_warps = 8
+    num_experts = num_recv_tokens_per_expert.shape[0]
+    hidden_size = recv_x.shape[1]
+    grid = num_experts
+    BLOCK_E = 256
+
+    assert m_indices.shape[0] % BLOCK_E == 0
+    _fwd_kernel_ep_scatter_1_use_groupgemm[(grid,)](
+        num_recv_tokens_per_expert,
+        expert_start_loc,
+        m_indices,
+        num_experts=num_experts,
+        num_warps=num_warps,
+        BLOCK_E=BLOCK_E,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+    )
+
+    grid = min(recv_topk.shape[0], 1024 * 8)
+
+    _fwd_kernel_ep_scatter_non_quant[(grid,)](
+        recv_topk.shape[0],
+        expert_start_loc,
+        recv_x,              # e.g., bfloat16
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_topk,           # int32
+        recv_topk.stride(0),
+        recv_topk.stride(1),
+        output_tensor,       # same dtype as recv_x
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_index,
+        output_index.stride(0),
+        output_index.stride(1),
+        topk_num=recv_topk.shape[1],
+        HIDDEN_SIZE=hidden_size,
+        HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+    )
+    return
+
+
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -843,22 +980,24 @@ def ep_scatter(
     output_index: torch.Tensor,
     scale_ue8m0: bool = False,
 ):
-    BLOCK_E = 128  # token num of per expert is aligned to 128
-    BLOCK_D = 128  # block size of quantization
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
-
-    scale_hidden_size = hidden_size // BLOCK_D
+    if use_groupgemm:
+        BLOCK_E = 256
+        scale_hidden_size = recv_x_scale.shape[-1]
+    else:
+        BLOCK_E = 128  # token num of per expert is aligned to 128
+        BLOCK_D = 128  # block size of quantization
+        scale_hidden_size = hidden_size // BLOCK_D
     if scale_ue8m0:
         # ue8m0 scales are packed here (4 scales per int32),
         # hence the effective size of this dimension is divided by 4.
         scale_hidden_size = ceil_div(scale_hidden_size, 4)
 
     assert m_indices.shape[0] % BLOCK_E == 0
-
     is_fp8 = recv_x_scale is not None and recv_x.dtype != torch.bfloat16
     if is_fp8:
         assert (
@@ -867,16 +1006,26 @@ def ep_scatter(
         assert (
             recv_x_scale.shape[1] == output_tensor_scale.shape[1] == scale_hidden_size
         )
-
-    _fwd_kernel_ep_scatter_1[(grid,)](
-        num_recv_tokens_per_expert,
-        expert_start_loc,
-        m_indices,
-        num_experts=num_experts,
-        num_warps=num_warps,
-        BLOCK_E=BLOCK_E,
-        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
-    )
+    if use_groupgemm:
+        _fwd_kernel_ep_scatter_1_use_groupgemm[(grid,)](
+            num_recv_tokens_per_expert,
+            expert_start_loc,
+            m_indices,
+            num_experts=num_experts,
+            num_warps=num_warps,
+            BLOCK_E=BLOCK_E,
+            BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        )
+    else:
+        _fwd_kernel_ep_scatter_1[(grid,)](
+            num_recv_tokens_per_expert,
+            expert_start_loc,
+            m_indices,
+            num_experts=num_experts,
+            num_warps=num_warps,
+            BLOCK_E=BLOCK_E,
+            BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        )
 
     grid = min(recv_topk.shape[0], 1024 * 8)
 
@@ -912,6 +1061,105 @@ def ep_scatter(
         IS_FP8=is_fp8,
     )
     return
+
+@triton.jit
+def count_expert_histogram_kernel(
+    topk_ids_ptr,
+    counts_ptr,
+    numel,
+    E: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * 1024 + tl.arange(0, 1024)  # [1024]
+    mask = offs < numel
+    expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    valid_mask = (expert_id >= 0) & (expert_id < E)
+    tl.atomic_add(counts_ptr + expert_id, 1, mask=valid_mask)
+
+
+@triton.jit
+def compute_slots_kernel(
+    counts_ptr,
+    slots_ptr,
+    E,
+):
+    i = tl.program_id(0)
+    if i < E:
+        cnt = tl.load(counts_ptr + i)
+        slot = (cnt + 255) // 256  # equivalent to ceil(cnt/256)
+        tl.store(slots_ptr + i, slot)
+
+
+@triton.jit
+def build_m_indices_kernel(
+    prefix_slots_ptr,
+    actual_counts_ptr,
+    m_indices_ptr,
+    E,
+    MAX_E: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    total_slots = tl.load(prefix_slots_ptr + E - 1)
+    total_elements = total_slots * 256
+
+    mask = offs < total_elements
+
+    slot_id = offs >> 8  # Equivalent to offs // 256
+
+    expert = tl.zeros([BLOCK], dtype=tl.int32)
+    for i in range(0, MAX_E):
+        ps = tl.load(prefix_slots_ptr + i, mask=i < E, other=2 ** 30)
+        expert += slot_id >= ps
+
+    start_slot = tl.where(expert > 0, tl.load(prefix_slots_ptr + expert - 1, mask=expert > 0, other=0), 0)
+
+    rel_slot = slot_id - start_slot
+    pos_in_slot = offs & 0xFF
+    rel_pos = rel_slot * 256 + pos_in_slot
+
+    count_for_expert = tl.load(actual_counts_ptr + expert, mask=mask)
+
+    valid_pos = rel_pos < count_for_expert
+
+    result = tl.where(valid_pos, expert, -1)
+    tl.store(m_indices_ptr + offs, result, mask=mask)
+
+
+def build_m_indices_triton(topk_ids, device, num_experts):
+
+    actual_counts = torch.zeros(num_experts, device=topk_ids.device, dtype=torch.int32)
+    grid = (triton.cdiv(topk_ids.numel(), 1024),)
+    count_expert_histogram_kernel[grid](
+        topk_ids, actual_counts, topk_ids.numel(), E=num_experts
+    )
+
+    slots_per_expert = torch.empty_like(actual_counts)
+    compute_slots_kernel[(num_experts,)](actual_counts, slots_per_expert, num_experts)
+
+    prefix_slots = torch.cumsum(slots_per_expert, dim=0)
+
+    total_slots = prefix_slots[-1].item()
+    total_elements = total_slots * 256
+    m_indices = torch.full(
+        (total_elements,),
+        -1,
+        device=device,
+        dtype=torch.int32,
+    )
+
+    BLOCK = 1024
+    grid = (triton.cdiv(total_elements, BLOCK),)
+    build_m_indices_kernel[grid](
+        prefix_slots,
+        actual_counts,
+        m_indices,
+        num_experts,
+        MAX_E=num_experts,
+        BLOCK=BLOCK,
+    )
+    return m_indices
 
 
 @triton.jit
@@ -991,7 +1239,10 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    BLOCK_D = 128 if hidden_size % 1024 != 0 else 1024  # block size of quantization
+    if use_groupgemm:
+        BLOCK_D = min(hidden_size, 1024)
+    else:
+        BLOCK_D = 128 if hidden_size % 1024 != 0 else 1024  # block size of quantization
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
@@ -1581,3 +1832,133 @@ def fp8_per_token_to_per_tensor_quant_triton(
         K_BLOCK_SIZE=K_BLOCK_SIZE,
         num_warps=8,
     )
+from triton.language.extra import libdevice
+from typing import Optional
+@triton.jit
+def _per_token_quant_int8_one_kernel_opt(
+    x_ptr,
+    xq_ptr,
+    scale_ptr,
+    stride_x,
+    stride_xq,
+    N,
+    T_dim,
+    tokens_per_expert_ptr,
+    BLOCK: tl.constexpr
+):
+    row_id = tl.program_id(0)
+
+    if tokens_per_expert_ptr is not None:
+        e = row_id // T_dim
+        t = row_id % T_dim
+
+        num_valid_tokens_for_e = tl.load(tokens_per_expert_ptr + e)
+
+        if t >= num_valid_tokens_for_e:
+            return
+
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
+
+    x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask,
+                other=0.0).to(tl.float32)
+    absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
+    scale_x = absmax / 127
+    x_q = x * (127 / absmax)
+    x_q = libdevice.nearbyint(x_q).to(tl.int8)
+
+    tl.store(xq_ptr + row_id * stride_xq + cols, x_q, mask=mask)
+    tl.store(scale_ptr + row_id, scale_x)
+
+@triton.jit
+def _per_token_quant_int8_kernel_opt(
+    x_ptr,
+    xq_ptr,
+    scale_ptr,
+    stride_x,
+    stride_xq,
+    N,
+    E_dim,
+    T_dim,
+    tokens_per_expert_ptr,
+    BLOCK: tl.constexpr
+):
+    token_idx_start = tl.program_id(0)
+    grid_size = tl.num_programs(0)
+    num_total_tokens = E_dim * T_dim
+
+    for token_idx in range(token_idx_start, num_total_tokens, grid_size):
+
+        is_valid_token = True
+        if tokens_per_expert_ptr is not None:
+            e = token_idx // T_dim
+            t = token_idx % T_dim
+
+            num_valid_tokens_for_e = tl.load(tokens_per_expert_ptr + e)
+
+            if t >= num_valid_tokens_for_e:
+                is_valid_token = False
+
+        if is_valid_token:
+            cols = tl.arange(0, BLOCK)
+            mask = cols < N
+
+            x = tl.load(x_ptr + token_idx * stride_x + cols, mask=mask,
+                        other=0.0).to(tl.float32)
+            absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
+            scale_x = absmax / 127
+            x_q = x * (127 / absmax)
+            x_q = libdevice.nearbyint(x_q).to(tl.int8)
+
+            tl.store(xq_ptr + token_idx * stride_xq + cols, x_q, mask=mask)
+            tl.store(scale_ptr + token_idx, scale_x)
+
+
+def per_token_quant_int8_triton_opt(x: torch.Tensor,
+                                    tokens_per_expert: Optional[torch.Tensor] = None):
+    if x.dim() != 3:
+        raise ValueError(f"Input must be 3D [E, T, H], but got {x.shape}")
+    E, T, H = x.shape
+    N = H
+
+    x_q = torch.empty_like(x, device=x.device, dtype=torch.int8)
+    scales = torch.empty(x.shape[:-1] + (1, ), device=x.device, dtype=torch.float32)
+    BLOCK = triton.next_power_of_2(N)
+    num_warps = min(max(BLOCK // 256, 1), 8)
+    if (E == 8 and T >= 1024) or (E == 16 and T >= 512):
+        num_warps = 1
+
+    num_tokens = E * T
+    grid_opt = num_tokens
+
+    if (E == 8 and T >= 1024) or (E == 16 and T >= 512):
+        grid_opt = max(1, num_tokens // (T // 256))
+        _per_token_quant_int8_kernel_opt[(grid_opt, )](
+            x,
+            x_q,
+            scales,
+            stride_x=x.stride(-2),
+            stride_xq=x_q.stride(-2),
+            N=N,
+            E_dim=E,
+            T_dim=T,
+            tokens_per_expert_ptr=tokens_per_expert,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=1,
+        )
+    else:
+        _per_token_quant_int8_one_kernel_opt[(grid_opt, )](
+            x,
+            x_q,
+            scales,
+            stride_x=x.stride(-2),
+            stride_xq=x_q.stride(-2),
+            N=N,
+            T_dim=T,
+            tokens_per_expert_ptr=tokens_per_expert,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+            num_stages=1,
+        )
+    return x_q, scales

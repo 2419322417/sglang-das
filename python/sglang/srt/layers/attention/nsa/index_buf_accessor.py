@@ -6,9 +6,10 @@ import triton.language as tl
 
 from sglang.srt.layers.attention.nsa.utils import aiter_can_use_preshuffle_paged_mqa
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
-from sglang.srt.utils import get_bool_env_var, is_hip
+from sglang.srt.utils import get_bool_env_var, is_hip, is_dcu
 
 _is_hip = is_hip()
+_is_dcu = is_dcu()
 _is_fp8_fnuz = is_fp8_fnuz()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 # aiter cp_gather kernel with preshuffle=True is only valid when the indexer
@@ -409,6 +410,13 @@ def _set_k_and_s_triton(
     :param index_k_scale: (num_tokens_to_write, 1 elem), fp32
     :return:
     """
+    # Normalize shapes for AMD fallback
+    if index_k.dim() > 2:
+        index_k = index_k.reshape(-1, index_k.size(-1))
+
+    if index_k_scale.dim() > 2:
+        index_k_scale = index_k_scale.reshape(-1, index_k_scale.size(-1))
+
     num_pages, buf_numel_per_page = buf.shape
     (num_tokens_to_write,) = loc.shape
     num_tokens_to_write_, index_head_dim = index_k.shape
@@ -423,19 +431,16 @@ def _set_k_and_s_triton(
         raise ValueError(
             f"index_k_scale must be 1D or 2D, got shape {index_k_scale.shape}"
         )
-    assert buf_numel_per_page == page_size * (128 + 4)
+
+    if _is_hip and not _is_dcu: #nhb
+        assert buf_numel_per_page == 1 * (128 + 4)
+    else:
+        assert buf_numel_per_page == 64 * (128 + 4)
     assert num_tokens_to_write == num_tokens_to_write_ == num_tokens_to_write__
     assert index_head_dim == 128
     assert scale_dim == 1
-    if _is_hip:
-        if _use_aiter_preshuffle:
-            assert (
-                page_size % 16 == 0
-            ), f"HIP preshuffle requires page_size to be a multiple of 16, got {page_size}"
-        else:
-            assert (
-                page_size == 1
-            ), f"HIP legacy NSA path requires page_size == 1, got {page_size}"
+    if _is_hip and not _is_dcu: #nhb
+        assert page_size == 1
     else:
         assert page_size == 64
 

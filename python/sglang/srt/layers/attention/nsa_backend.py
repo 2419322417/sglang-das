@@ -36,19 +36,23 @@ from sglang.srt.layers.attention.utils import (
 )
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.utils import is_cuda, is_hip
+from sglang.srt.utils import is_cuda, is_hip, is_dcu
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.spec_info import SpecInput
 
-
+import logging
+logger = logging.getLogger(__name__)
 _is_hip = is_hip()
+_is_dcu = is_dcu()
 
 if _is_hip:
     from sglang.srt.layers.attention.nsa.triton_kernel import get_valid_kv_indices
 
+
+if _is_hip and not _is_dcu:
     try:
         from aiter import (  # noqa: F401
             flash_attn_varlen_func,
@@ -61,10 +65,12 @@ if _is_hip:
             "aiter is AMD specific kernel library. Please make sure aiter is installed on your AMD device."
         )
 else:
-    from sglang.jit_kernel.flash_attention import (
-        flash_attn_varlen_func,
-        flash_attn_with_kvcache,
-    )
+    # from sglang.jit_kernel.flash_attention import (
+    #     flash_attn_varlen_func,
+    #     flash_attn_with_kvcache,
+    # )
+    pass
+from sglang.srt.layers.attention.flashattention_interface import flash_attn_with_kvcache
 
 
 def _to_2d_context_lens(seqlens_32: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -84,6 +90,11 @@ global_workspace_buffer = None
 # Control whether to use fused metadata copy kernel for cuda graph replay (default: enabled)
 # Set SGLANG_USE_FUSED_METADATA_COPY=0 or false to disable
 _USE_FUSED_METADATA_COPY = envs.SGLANG_USE_FUSED_METADATA_COPY.get() and not _is_hip
+DECODE_PRINT=False
+# Control whether to verify fused metadata copy against individual copies (default: disabled)
+# Set SGLANG_VERIFY_FUSED_METADATA_COPY=1 or true to enable verification
+# This will crash with detailed error message if any inconsistency is detected
+# _VERIFY_FUSED_METADATA_COPY = envs.SGLANG_VERIFY_FUSED_METADATA_COPY.get()
 
 
 @dataclass(frozen=True)
@@ -93,15 +104,30 @@ class NSAFlashMLAMetadata:
     flashmla_metadata: torch.Tensor
     num_splits: torch.Tensor
 
-    def slice(self, sli):
-        return NSAFlashMLAMetadata(
-            flashmla_metadata=self.flashmla_metadata,
-            num_splits=self.num_splits[sli],
-        )
+    def slice(self, sli): #nhb
+        if self.num_splits:
+            return NSAFlashMLAMetadata(
+                flashmla_metadata=self.flashmla_metadata,
+                num_splits=self.num_splits[sli],
+            )
+        else:
+            return NSAFlashMLAMetadata(
+                flashmla_metadata=self.flashmla_metadata,
+                num_splits=self.num_splits,
+            )
 
-    def copy_(self, other: "NSAFlashMLAMetadata"):
-        self.flashmla_metadata.copy_(other.flashmla_metadata)
-        self.num_splits.copy_(other.num_splits)
+    def copy_(self, other: "NSAFlashMLAMetadata"): #nhb
+        if other.flashmla_metadata is None:
+            self.flashmla_metadata = None
+        else:
+            self.flashmla_metadata.copy_(
+                other.flashmla_metadata.flashmla_metadata
+            )
+
+        if other.num_splits is None:
+            self.num_splits=None
+        else:
+            self.num_splits.copy_(other.num_splits)
 
 
 @dataclass(frozen=True)
@@ -233,11 +259,15 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
         batch_idx_list: List[int] = None,
         topk_indices_offset_override: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from sgl_kernel import (
-            fast_topk_transform_fused,
-            fast_topk_transform_ragged_fused,
-            fast_topk_v2,
-        )
+        if not _is_dcu:
+            from sgl_kernel import (
+                fast_topk_transform_fused,
+                fast_topk_transform_ragged_fused,
+                fast_topk_v2,
+            )
+        else:
+            from lightop import fast_topk_transform_fused, fast_topk_transform_ragged_fused
+            from sgl_kernel import fast_topk_v2
 
         if topk_indices_offset_override is not None:
             cu_topk_indices_offset = topk_indices_offset_override
@@ -666,7 +696,6 @@ class NativeSparseAttnBackend(
                 )
             except (ImportError, ModuleNotFoundError):
                 paged_mqa_schedule_metadata = None
-
         metadata = NSAMetadata(
             page_size=self.real_page_size,
             cache_seqlens_int32=cache_seqlens_int32,
@@ -699,6 +728,7 @@ class NativeSparseAttnBackend(
             indexer_seq_lens=indexer_seq_lens,
             token_to_batch_idx=token_to_batch_idx,
         )
+
         self.forward_metadata = metadata
 
     def _cal_indexer_k_start_end(
@@ -856,11 +886,15 @@ class NativeSparseAttnBackend(
                 flashmla_metadata = self.decode_cuda_graph_metadata[
                     "flashmla_metadata"
                 ].slice(slice(0, num_tokens + 1))
-                flashmla_metadata.copy_(
-                    self._compute_flashmla_metadata(
-                        cache_seqlens=nsa_cache_seqlens_int32,
-                        seq_len_q=1,
-                    )
+                # flashmla_metadata.copy_(
+                #     self._compute_flashmla_metadata(
+                #         cache_seqlens=nsa_cache_seqlens_int32,
+                #         seq_len_q=1,
+                #     )
+                # )
+                flashmla_metadata = self._compute_flashmla_metadata( #nhb
+                    cache_seqlens=nsa_cache_seqlens_int32,
+                    seq_len_q=1,
                 )
             else:
                 flashmla_metadata = None
@@ -916,11 +950,15 @@ class NativeSparseAttnBackend(
                     "flashmla_metadata"
                 ].slice(slice(0, bs * self.speculative_num_draft_tokens + 1))
 
-                flashmla_metadata.copy_(
-                    self._compute_flashmla_metadata(
-                        cache_seqlens=nsa_cache_seqlens_int32,
-                        seq_len_q=1,
-                    )
+                # flashmla_metadata.copy_( #nhb
+                #     self._compute_flashmla_metadata(
+                #         cache_seqlens=nsa_cache_seqlens_int32,
+                #         seq_len_q=1,
+                #     )
+                # )
+                flashmla_metadata = self._compute_flashmla_metadata(
+                    cache_seqlens=nsa_cache_seqlens_int32,
+                    seq_len_q=1,
                 )
             else:
                 flashmla_metadata = None
@@ -1134,12 +1172,16 @@ class NativeSparseAttnBackend(
             flashmla_metadata = metadata.flashmla_metadata.slice(
                 slice(0, seqlens_expanded_size + 1)
             )
-            flashmla_metadata.copy_(
-                self._compute_flashmla_metadata(
+            # flashmla_metadata.copy_(
+            #     self._compute_flashmla_metadata(
+            #         cache_seqlens=nsa_cache_seqlens,
+            #         seq_len_q=1,
+            #     )
+            # )
+            flashmla_metadata = self._compute_flashmla_metadata( #nhb
                     cache_seqlens=nsa_cache_seqlens,
                     seq_len_q=1,
                 )
-            )
 
         self.forward_metadata = metadata
 
@@ -1293,7 +1335,8 @@ class NativeSparseAttnBackend(
             if precomputed.flashmla_metadata is not None:
                 size = precomputed.seqlens_expanded_size
                 flashmla_metadata = metadata.flashmla_metadata.slice(slice(0, size + 1))
-                flashmla_metadata.copy_(precomputed.flashmla_metadata)
+                #flashmla_metadata.copy_(precomputed.flashmla_metadata)
+                flashmla_metadata = precomputed.flashmla_metadata #nhb
 
         # Refresh DeepGEMM paged MQA schedule metadata for the actual seqlens of
         # this replay (the captured graph holds stale data otherwise, which can
@@ -1624,7 +1667,6 @@ class NativeSparseAttnBackend(
                 topk_indices=topk_indices,
                 page_size=1,
             )
-
         if self.nsa_decode_impl == "flashmla_sparse":
             if q_rope is not None:
                 q_all = concat_mla_absorb_q_general(q_nope, q_rope)
@@ -1712,6 +1754,8 @@ class NativeSparseAttnBackend(
         qk_rope_dim = k_rope_cache.shape[-1]
         k_rope_cache = k_rope_cache.view(-1, page_size, 1, qk_rope_dim)
         c_kv_cache = c_kv_cache.view(-1, page_size, 1, v_head_dim)
+        k_rope_cache = k_rope_cache.to(q_rope.dtype)
+        c_kv_cache = c_kv_cache.to(q_rope.dtype)
         o = flash_attn_with_kvcache(
             q=q_rope,
             k_cache=k_rope_cache,
@@ -1738,7 +1782,8 @@ class NativeSparseAttnBackend(
         page_table_1: torch.Tensor,
         sm_scale: float,
     ) -> torch.Tensor:
-        from sgl_kernel.flash_mla import flash_mla_sparse_fwd
+        #from sgl_kernel.flash_mla import flash_mla_sparse_fwd 
+        from flash_mla.flash_mla_interface import  flash_mla_sparse_fwd
 
         # FlashMLA sparse kernel requires num_heads to be a multiple of 64 (Hopper) or 128 (Blackwell)
         # When using TP, num_heads might be smaller (e.g., 256//8=32)
@@ -1746,22 +1791,21 @@ class NativeSparseAttnBackend(
 
         # Determine required padding based on GPU architecture (use cached value)
         required_padding = 128 if self.device_sm_major >= 10 else 64
-
         need_padding = num_heads % required_padding != 0
 
-        if need_padding:
-            assert required_padding % num_heads == 0, (
-                f"num_heads {num_heads} cannot be padded to {required_padding}. "
-                f"TP size may be too large for this model."
-            )
+        # if need_padding:
+        #     assert required_padding % num_heads == 0, (
+        #         f"num_heads {num_heads} cannot be padded to {required_padding}. "
+        #         f"TP size may be too large for this model."
+        #     )
 
-            # Pad q to required size
-            q_padded = q_all.new_zeros((num_tokens, required_padding, head_dim))
-            q_padded[:, :num_heads, :] = q_all
-            q_input = q_padded
-        else:
-            q_input = q_all
-
+        #     # Pad q to required size
+        #     q_padded = q_all.new_zeros((num_tokens, required_padding, head_dim))
+        #     q_padded[:, :num_heads, :] = q_all
+        #     q_input = q_padded
+        # else:
+        #     q_input = q_all
+        q_input = q_all
         # indices shape must be (s_q, h_kv=1, topk), keep h_kv=1 unchanged
         indices_input = page_table_1.unsqueeze(1)
 
@@ -1774,8 +1818,8 @@ class NativeSparseAttnBackend(
         )
 
         # Trim output back to original num_heads if we padded
-        if need_padding:
-            o = o[:, :num_heads, :]
+        # if need_padding:
+        #     o = o[:, :num_heads, :]
 
         return o
 
@@ -1789,7 +1833,8 @@ class NativeSparseAttnBackend(
         metadata: NSAMetadata,
         page_table_1,
     ) -> torch.Tensor:
-        from sgl_kernel.flash_mla import flash_mla_with_kvcache
+        #from sgl_kernel.flash_mla import flash_mla_with_kvcache
+        from flash_mla.flash_mla_interface import  flash_mla_with_kvcache
 
         cache_seqlens = metadata.nsa_cache_seqlens_int32
         assert metadata.flashmla_metadata is not None
@@ -1811,7 +1856,8 @@ class NativeSparseAttnBackend(
         assert self.real_page_size == 64, "only page size 64 is supported"
 
         if not self.nsa_kv_cache_store_fp8:
-            # inefficiently quantize the whole cache
+            # Current flash_mla sparse-kvcache path requires FP8 cache when
+            # indices are provided, so BF16 KV must still be quantized here.
             kv_cache = quantize_k_cache(kv_cache)
 
         indices = page_table_1.unsqueeze(1)
@@ -1839,6 +1885,7 @@ class NativeSparseAttnBackend(
             o = o[:, :, :num_q_heads, :]
 
         return o
+
 
     def _forward_standard_mha(
         self,
@@ -2235,7 +2282,7 @@ class NativeSparseAttnBackend(
         if not self.use_mha and self.enable_auto_select_prefill_impl:
             if self.nsa_kv_cache_store_fp8:
                 if (
-                    is_blackwell()
+                    ( is_blackwell() or _is_dcu )
                     and forward_batch is not None
                     and forward_batch.forward_mode == ForwardMode.EXTEND
                 ):
@@ -2285,10 +2332,11 @@ class NativeSparseAttnBackend(
         )
 
     def _compute_flashmla_metadata(self, cache_seqlens: torch.Tensor, seq_len_q: int):
-        from sgl_kernel.flash_mla import get_mla_metadata
+        #from sgl_kernel.flash_mla import get_mla_metadata
+        from flash_mla.flash_mla_interface import  get_mla_metadata
 
         num_heads_q = self.flashmla_kv_num_q_heads
-
+        
         flashmla_metadata, num_splits = get_mla_metadata(
             cache_seqlens=cache_seqlens,
             # TODO doc says `num_q_tokens_per_q_seq * num_heads_q // num_heads_k`
@@ -2299,10 +2347,9 @@ class NativeSparseAttnBackend(
             is_fp8_kvcache=True,
             topk=self.nsa_index_topk,
         )
-
         return NSAFlashMLAMetadata(
             flashmla_metadata=flashmla_metadata,
-            num_splits=num_splits,
+            num_splits=flashmla_metadata.num_splits,
         )
 
 

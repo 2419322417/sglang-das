@@ -22,7 +22,8 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
-from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
+# from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
+from lmslim.layers.gemm.int8_utils import per_token_quant_int8
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -36,6 +37,7 @@ from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+from lmslim import quant_ops
 
 _is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -223,7 +225,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         x_scale_2d = x_scale.view(-1, x_scale.shape[-1])
         output_shape = [*x_q.shape[:-1], layer.weight.shape[1]]
 
-        output = int8_scaled_mm(
+        output = quant_ops.triton_scaled_mm(
             x_q_2d,
             layer.weight,
             x_scale_2d,

@@ -41,6 +41,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+import sglang.srt.distributed.device_communicators.custom_all_reduce_ops as ops
 
 from sglang.srt.compilation.compilation_config import register_split_op
 from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
@@ -53,6 +54,7 @@ from sglang.srt.utils import (
     is_cuda_alike,
     is_hip,
     is_musa,
+    is_dcu,
     is_npu,
     is_shm_available,
     is_xpu,
@@ -60,10 +62,16 @@ from sglang.srt.utils import (
 from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.network import get_local_ip_auto
 
+_use_fused_reshape_to_float = get_bool_env_var("SGLANG_USE_FUSED_RESHAPE_TO_FLOAT")
+
 _is_npu = is_npu()
 _is_cpu = is_cpu()
+_is_dcu = is_dcu()
 _is_xpu = is_xpu()
 _is_musa = is_musa()
+use_quick_custom_allreduce = get_bool_env_var(
+    "SGLANG_USE_QUICK_CUSTOM_ALLREDUCE", default="false"
+)
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
@@ -337,7 +345,7 @@ class GroupCoordinator:
 
         # Lazy import to avoid documentation build error
         from sglang.srt.distributed.device_communicators.custom_all_reduce import (
-            dispatch_custom_allreduce,
+            dispatch_custom_allreduce, DCUCustomAllreduce
         )
         from sglang.srt.distributed.device_communicators.pymscclpp import (
             PyMscclppCommunicator,
@@ -384,18 +392,23 @@ class GroupCoordinator:
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             try:
-                CAClass = dispatch_custom_allreduce()
-                self.ca_comm = CAClass(
-                    group=self.cpu_group,
-                    device=self.device,
-                )
+                if is_hip() and ops.use_dcu_custom_allreduce:
+                    self.ca_comm = DCUCustomAllreduce(
+                        group=self.cpu_group,
+                        device=self.device,
+                    )
+                else:
+                    CAClass = dispatch_custom_allreduce()
+                    self.ca_comm = CAClass(
+                        group=self.cpu_group,
+                        device=self.device,
+                    )
             except Exception as e:
                 logger.warning(
                     f"Setup Custom allreduce failed with {e}. To silence this "
                     "warning, specify --disable-custom-all-reduce explicitly."
                 )
-
-            if is_hip():
+            if is_hip() and use_quick_custom_allreduce:
                 try:
                     # Initialize a custom quick all-reduce implementation for AMD
                     # when rocm >= gfx942. Quick reduce is designed as a
@@ -905,9 +918,15 @@ class GroupCoordinator:
         # Reshape
         output_tensor = output_tensor.reshape((world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
-        output_tensor = output_tensor.reshape(
-            input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
-        )
+
+        if _is_dcu and _use_fused_reshape_to_float:
+            from lightop import op
+            vocab_size = input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+            output_tensor = op.reshape_to_float(output_tensor, vocab_size[1])
+        else:
+            output_tensor = output_tensor.reshape(
+                input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+            )
         return output_tensor
 
     def all_gatherv(

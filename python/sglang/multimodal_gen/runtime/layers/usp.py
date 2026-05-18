@@ -249,3 +249,58 @@ def ring_attn(
     # Permute the output back to [B, S, H, D] layout.
     output = torch.permute(out, [0, 2, 1, 3])
     return output
+
+def ring_attn_overlap(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_impl: "AttentionImpl",
+    is_causal: bool = False,
+    dropout_p: float = 0.0,
+):
+    """
+    Ring Attention implementation.
+
+    This function implements Ring Attention, a strategy for distributed attention
+    computation that reduces peak memory usage. It accepts a generic attention
+    implementation (`attn_impl`) which is called by the underlying ring attention
+    primitive.
+
+    All tensors use BSHD layout [B, S, H, D] throughout — no layout conversion needed.
+
+    Args:
+        query, key, value: The input tensors for attention (BSHD layout).
+        attn_impl: An instance of an attention implementation backend
+                   (e.g., FlashAttentionImpl) whose `forward` method will be
+                   used as the computational kernel.
+        is_causal: Whether to apply causal masking.
+        dropout_p: Dropout probability.
+    """
+    from sglang.multimodal_gen.runtime.layers.ring_attention import _templated_ring_attention_overlap as _templated_ring_attention
+    ring_pg = get_sp_group().ring_group
+    assert ring_pg is not None, "Ring process group is not initialized."
+
+    def attn_callable(q, k, v, *args, **kwargs):
+        # q,k,v are already in BSHD layout, same as FlashAttention expects
+        output, softmax_lse, *rest = attn_impl.forward(
+            q,
+            k,
+            v,
+            attn_metadata=None,
+            return_softmax_lse=True,
+        )
+        # FA returns lse as [B, H, S], but merger expects lse layout to match
+        # output [B, S, H, D] — transpose H and S dims so lse is [B, S, H]
+        return output, softmax_lse.transpose(1, 2), *rest
+
+    output, *_ = _templated_ring_attention(
+        group=ring_pg,
+        seq_dim=1,
+        op=attn_callable,
+        query=query,
+        key=key,
+        value=value,
+        is_causal=is_causal,
+        dropout_p=dropout_p,
+    )
+    return output

@@ -31,7 +31,7 @@ def qr_rocm_arch_available():
     try:
         props = torch.cuda.get_device_properties(0)
         gcn_arch = getattr(props, "gcnArchName", "")
-        supported_archs = ["gfx94", "gfx95"]
+        supported_archs = ["gfx94", "gfx95", "gfx936", "gfx938"]
         return any(gfx in gcn_arch for gfx in supported_archs)
     except Exception as e:
         logger.warning("Failed to determine ROCm for quick allreduce: %s", e)
@@ -173,7 +173,7 @@ class QuickAllReduce:
         self.use_fp16_kernels = int(
             os.environ.get("ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", 1)
         )
-        regime_str = os.environ.get("ROCM_QUICK_REDUCE_QUANTIZATION", "NONE")
+        regime_str = os.environ.get("ROCM_QUICK_REDUCE_QUANTIZATION", "INT8")
         if regime_str not in QuickReduceRegime.__members__:
             logger.warning(
                 "Custom quick allreduce:",
@@ -241,8 +241,8 @@ class QuickAllReduce:
             dtype = torch.float16
         return (
             inp_size <= self.qr_max_size
-            and inp_size
-            >= self._QR_MIN_SIZE[(dtype, self.world_size)][self.qr_quant_level.value]
+            # and inp_size
+            # >= self._QR_MIN_SIZE[(dtype, self.world_size)][self.qr_quant_level.value]
         )
 
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):

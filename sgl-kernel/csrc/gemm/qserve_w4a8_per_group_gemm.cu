@@ -25,7 +25,7 @@
 #define INTRIN_M 16
 #define INTRIN_N 16
 #define INTRIN_K 32
-#define WARP_SIZE 32
+#define WARP_SIZE 64
 #define SMEM_PAD_A 0
 #define SMEM_PAD_B 0
 #define PACK_SIZE 16

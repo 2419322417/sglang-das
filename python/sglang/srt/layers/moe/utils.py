@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from contextlib import contextmanager
@@ -7,6 +8,7 @@ from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from packaging import version as pkg_version
 
 from sglang.srt.distributed.parallel_state import get_moe_expert_parallel_world_size
 from sglang.srt.layers.dp_attention import (
@@ -312,6 +314,15 @@ def get_tbo_token_distribution_threshold() -> float:
         )
         TBO_TOKEN_DISTRIBUTION_THRESHOLD = 0.48
     return TBO_TOKEN_DISTRIBUTION_THRESHOLD
+
+# @lru_cache(maxsize=1)
+def should_use_flashinfer_trtllm_moe():
+    result = get_moe_runner_backend().is_flashinfer_trtllm() and (
+        not importlib.util.find_spec("flashinfer")
+        or pkg_version.parse(__import__("flashinfer").__version__)
+        >= pkg_version.parse("0.2.9rc1")
+    )
+    return result
 
 
 def filter_moe_weight_param_global_expert(name, x, num_local_experts):

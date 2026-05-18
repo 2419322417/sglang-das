@@ -44,8 +44,9 @@ from sglang.srt.speculative.spec_utils import (
     get_src_tgt_cache_loc,
     get_target_cache_loc,
 )
-from sglang.srt.utils import is_cuda, is_musa, next_power_of_2
-
+from sglang.srt.utils import is_cuda, is_musa, next_power_of_2, get_bool_env_var
+from sgl_kernel.kvcacheio import dcu_create_extend_after_decode_spec_info,dcu_assign_req_to_token_pool,dcu_align_evict_mask_to_page_size
+# _is_npu = is_npu()
 if is_cuda() or is_musa():
     from sgl_kernel import (
         top_k_renorm_prob,
@@ -84,6 +85,8 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
     seq_lens_sum: int
     seq_lens_cpu: torch.Tensor
     grammar: BaseGrammarObject = None
+    use_sglang_assign_req_to_token_pool = get_bool_env_var("SGLANG_ASSIGN_REQ_TO_TOKEN_POOL")
+    use_sglang_align_evict_mask_to_page_size = get_bool_env_var("SGLANG_ALIGN_EVICT_MASK_TO_PAGE_SIZE")
 
     # Shape info for padding
     num_tokens_per_req: int = -1  # -1 auto-fills from draft_token_num.
@@ -162,6 +165,26 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             batch.out_cache_loc,
             bs,
         )
+        # if self.use_sglang_assign_req_to_token_pool:
+        #     dcu_assign_req_to_token_pool(
+        #         req_pool_indices = batch.req_pool_indices,
+        #         req_to_token = batch.req_to_token_pool.req_to_token,
+        #         allocate_lens = batch.seq_lens,
+        #         new_allocate_lens = end_offset,
+        #         out_cache_loc = batch.out_cache_loc,
+        #         shape = batch.req_to_token_pool.req_to_token.shape[1],
+        #         bs = bs,
+        #     )
+        # else:
+        #     assign_req_to_token_pool[(bs,)](
+        #         batch.req_pool_indices,
+        #         batch.req_to_token_pool.req_to_token,
+        #         batch.seq_lens,
+        #         end_offset,
+        #         batch.out_cache_loc,
+        #         batch.req_to_token_pool.req_to_token.shape[1],
+        #         next_power_of_2(bs),
+        #     )
 
         if get_global_server_args().enable_mamba_extra_buffer():
             batch.mamba_track_indices = torch.tensor(
@@ -491,13 +514,22 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         else:
             if self.topk == 1:
                 # Only evict full empty page. Do not evict partial empty page
-                align_evict_mask_to_page_size[len(batch.seq_lens),](
-                    batch.seq_lens,
-                    evict_mask,
-                    page_size,
-                    self.draft_token_num,
-                    next_power_of_2(self.draft_token_num),
-                )
+                if self.use_sglang_align_evict_mask_to_page_size:
+                    dcu_align_evict_mask_to_page_size(
+                        seq_lens = batch.seq_lens,
+                        evict_mask = evict_mask,
+                        page_size = page_size,
+                        num_draft_tokens = self.draft_token_num,
+                        bs = len(batch.seq_lens),
+                    )
+                else:
+                    align_evict_mask_to_page_size[len(batch.seq_lens),](
+                        batch.seq_lens,
+                        evict_mask,
+                        page_size,
+                        self.draft_token_num,
+                        next_power_of_2(self.draft_token_num),
+                    )
                 token_to_kv_pool_allocator.free(batch.out_cache_loc[evict_mask])
             else:
                 # Shift the accepted tokens to the beginning.
@@ -548,6 +580,26 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         if not has_finished:
             if page_size == 1 or self.topk == 1:
                 batch.out_cache_loc = batch.out_cache_loc[accept_index]
+                # if self.use_sglang_assign_req_to_token_pool:
+                #     dcu_assign_req_to_token_pool(
+                #         req_pool_indices = batch.req_pool_indices,
+                #         req_to_token = batch.req_to_token_pool.req_to_token,
+                #         allocate_lens = batch.seq_lens,
+                #         new_allocate_lens = batch.seq_lens + accept_length + 1,
+                #         out_cache_loc = batch.out_cache_loc,
+                #         shape = batch.req_to_token_pool.req_to_token.shape[1],
+                #         bs = bs,
+                #     )
+                # else:
+                #     assign_req_to_token_pool[(bs,)](
+                #         batch.req_pool_indices,
+                #         batch.req_to_token_pool.req_to_token,
+                #         batch.seq_lens,
+                #         batch.seq_lens + accept_length + 1,
+                #         batch.out_cache_loc,
+                #         batch.req_to_token_pool.req_to_token.shape[1],
+                #         next_power_of_2(bs),
+                #     )
                 assign_req_to_token_pool_func(
                     batch.req_pool_indices,
                     batch.req_to_token_pool.req_to_token,
@@ -585,6 +637,26 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             )
         else:
             if page_size == 1 or self.topk == 1:
+                # if self.use_sglang_assign_req_to_token_pool:
+                #     dcu_assign_req_to_token_pool(
+                #         req_pool_indices = batch.req_pool_indices,
+                #         req_to_token = batch.req_to_token_pool.req_to_token,
+                #         allocate_lens = batch.seq_lens,
+                #         new_allocate_lens = batch.seq_lens + accept_length + 1,
+                #         out_cache_loc = batch.out_cache_loc[accept_index],
+                #         shape = batch.req_to_token_pool.req_to_token.shape[1],
+                #         bs = bs,
+                #     )
+                # else:
+                #     assign_req_to_token_pool[(bs,)](
+                #         batch.req_pool_indices,
+                #         batch.req_to_token_pool.req_to_token,
+                #         batch.seq_lens,
+                #         batch.seq_lens + accept_length + 1,
+                #         batch.out_cache_loc[accept_index],
+                #         batch.req_to_token_pool.req_to_token.shape[1],
+                #         next_power_of_2(bs),
+                #     )
                 assign_req_to_token_pool_func(
                     batch.req_pool_indices,
                     batch.req_to_token_pool.req_to_token,
@@ -701,6 +773,8 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     # `EagleDraftExtendInput` for these). Set during V2's draft-extend.
     num_correct_drafts: Optional[torch.Tensor] = None
     num_accept_tokens: Optional[torch.Tensor] = None
+
+    use_sglang_create_extend_after_decode_spec_info = get_bool_env_var("SGLANG_CREATE_EXTEND_AFTER_DECODE_SPEC_INFO", default="true")
 
     def __post_init__(self):
         super().__init__(SpecInputType.EAGLE_DRAFT)
@@ -954,16 +1028,27 @@ class EagleDraftExtendInput(SpecInput):
 
         self.capture_hidden_mode = CaptureHiddenMode.LAST
         self.positions = torch.empty_like(batch.input_ids, dtype=torch.long)
-        self.bonus_tokens = torch.empty_like(self.num_accept_tokens, dtype=torch.int32)
-
-        create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
-            batch.input_ids,
-            batch.seq_lens,
-            self.num_accept_tokens,
-            self.positions,
-            self.bonus_tokens,
-            next_power_of_2(max(speculative_num_steps + 1, len(batch.seq_lens))),
-        )
+        self.verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
+        if self.use_sglang_create_extend_after_decode_spec_info:
+            dcu_create_extend_after_decode_spec_info(
+                verified_id = batch.input_ids,
+                seq_lens = batch.seq_lens,
+                accept_lens = self.accept_length,
+                positions = self.positions,
+                new_verified_id = self.verified_id,
+                # bs = max(speculative_num_steps + 1, len(batch.seq_lens)),
+                bs =len(batch.seq_lens),
+            )
+        else:
+            self.bonus_tokens = torch.empty_like(self.num_accept_tokens, dtype=torch.int32)
+            create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
+                batch.input_ids,
+                batch.seq_lens,
+                self.num_accept_tokens,
+                self.positions,
+                self.bonus_tokens,
+                next_power_of_2(max(speculative_num_steps + 1, len(batch.seq_lens))),
+            )
 
     def generate_attn_arg_prefill(
         self,

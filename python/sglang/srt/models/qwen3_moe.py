@@ -81,21 +81,29 @@ from sglang.srt.models.utils import (
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     LazyValue,
+    get_bool_env_var,
     add_prefix,
     is_cuda,
+    is_dcu,
     is_flashinfer_available,
     is_non_idle_and_non_empty,
     is_npu,
 )
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
+_use_fused_qwen_bailing_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
+
 _is_cuda = is_cuda()
+_is_dcu = is_dcu()
 
 if _is_cuda:
     from sglang.jit_kernel.fused_qknorm_rope import (
         can_use_fused_qk_norm_rope,
         fused_qk_norm_rope,
     )
+
+if _is_dcu:
+    from lightop import rms_rotary_embedding_fuse_with_kv_store
 
 TConfig = TypeVar("TConfig", bound=PretrainedConfig)
 
@@ -548,6 +556,14 @@ class Qwen3MoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.alt_stream = alt_stream
+        self.page_size = 64
+        self.layer_id = layer_id
+        if get_global_server_args().kv_cache_dtype == "fp8_e4m3":
+            self.kv_cache_dtype = torch.float8_e4m3fn
+        elif get_global_server_args().kv_cache_dtype == "fp8_e5m2":
+            self.kv_cache_dtype = torch.float8_e5m2
+        elif get_global_server_args().kv_cache_dtype in ("bf16", "bfloat16"):
+            self.kv_cache_dtype = torch.bfloat16
 
     def op_prepare(self, state):
         state.attn_intermediate_state = self.forward_prepare(
@@ -630,29 +646,64 @@ class Qwen3MoeAttention(nn.Module):
         else:
             # Fallback to non-fused QK Norm & RoPE implementation
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q, k = apply_qk_norm(
-                q=q,
-                k=k,
-                q_norm=self.q_norm,
-                k_norm=self.k_norm,
-                head_dim=self.head_dim,
-                alt_stream=self.alt_stream,
-            )
-            q, k = self.rotary_emb(
-                positions,
-                q,
-                k,
-                fused_set_kv_buffer_arg=(
-                    create_fused_set_kv_buffer_arg(
-                        value=v,
-                        layer=self.attn,
-                        forward_batch=forward_batch,
-                    )
-                    if enable_fused_set_kv_buffer(forward_batch)
-                    and self.compatible_with_fused_kv_buffer
-                    else None
-                ),
-            )
+            if _is_dcu and _use_fused_qwen_bailing_rotary:
+                # Fused RMSNorm + RoPE + kv_store path through custom op.
+                cos_sin_cache = self.rotary_emb.cos_sin_cache
+                if (cos_sin_cache.device != q.device
+                        or cos_sin_cache.dtype != q.dtype):
+                    cos_sin_cache = cos_sin_cache.to(q.device,
+                                                    dtype=q.dtype,
+                                                    non_blocking=True)
+                    # Persist the converted cache so we don't re-copy/re-allocate
+                    # on every forward when the original buffer starts on CPU.
+                    self.rotary_emb.cos_sin_cache = cos_sin_cache
+                k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(self.layer_id)
+
+                q, k, v = rms_rotary_embedding_fuse_with_kv_store(
+                    positions,
+                    q,
+                    k,
+                    v,
+                    cos_sin_cache,
+                    self.head_dim,
+                    self.page_size,
+                    k_buffer,
+                    v_buffer,
+                    forward_batch.out_cache_loc,
+                    is_neox=True,
+                    weight_q=self.q_norm.weight,
+                    weight_k=self.k_norm.weight,
+                    output_dtype=self.kv_cache_dtype,
+                    residual_q=None,
+                    residual_k=None,
+                    k_scale=None,
+                    v_scale=None,
+                    epsilon=self.q_norm.variance_epsilon,
+                )
+            else:    
+                q, k = apply_qk_norm(
+                    q=q,
+                    k=k,
+                    q_norm=self.q_norm,
+                    k_norm=self.k_norm,
+                    head_dim=self.head_dim,
+                    alt_stream=self.alt_stream,
+                )
+                q, k = self.rotary_emb(
+                    positions,
+                    q,
+                    k,
+                    fused_set_kv_buffer_arg=(
+                        create_fused_set_kv_buffer_arg(
+                            value=v,
+                            layer=self.attn,
+                            forward_batch=forward_batch,
+                        )
+                        if enable_fused_set_kv_buffer(forward_batch)
+                        and self.compatible_with_fused_kv_buffer
+                        else None
+                    ),
+                )
             self._used_fused_qk_norm_rope_last_call = False
         return q, k, v
 

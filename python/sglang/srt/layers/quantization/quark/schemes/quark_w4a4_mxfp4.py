@@ -6,10 +6,11 @@ import torch
 
 from sglang.srt.layers.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from sglang.srt.layers.quantization.quark.schemes import QuarkLinearScheme
-from sglang.srt.utils import is_hip
+from sglang.srt.utils import is_hip, is_dcu
 
 _is_hip = is_hip()
-if _is_hip:
+_is_dcu = is_dcu()
+if _is_hip and not _is_dcu:
     from aiter.ops.triton.gemm.fused.fused_gemm_afp4wfp4_split_cat import (
         fused_gemm_afp4wfp4_split_cat,
     )

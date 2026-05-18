@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
+from sglang.srt.utils import is_dcu
 import torch
 
 from sglang.srt.distributed import get_tensor_model_parallel_rank
@@ -25,6 +26,7 @@ from sglang.srt.layers.quantization.unquant import (
     UnquantizedLinearMethod,
 )
 from sglang.srt.utils import get_device_capability, set_weight_attrs
+_is_dcu = is_dcu()
 
 logger = logging.getLogger(__name__)
 
@@ -92,20 +94,21 @@ class MoeWNA16Config(QuantizationConfig):
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
         elif self.linear_quant_method == "awq":
-            capability_tuple = get_device_capability()
-            device_capability = (
-                -1
-                if capability_tuple is None
-                else capability_tuple[0] * 10 + capability_tuple[1]
-            )
-            awq_min_capability = AWQConfig.get_min_capability()
-            if device_capability < awq_min_capability:
-                raise ValueError(
-                    "The quantization method moe_wna16 + awq is not supported "
-                    "for the current GPU. "
-                    f"Minimum capability: {awq_min_capability}. "
-                    f"Current capability: {device_capability}."
+            if not _is_dcu:
+                capability_tuple = get_device_capability()
+                device_capability = (
+                    -1
+                    if capability_tuple is None
+                    else capability_tuple[0] * 10 + capability_tuple[1]
                 )
+                awq_min_capability = AWQConfig.get_min_capability()
+                if device_capability < awq_min_capability:
+                    raise ValueError(
+                        "The quantization method moe_wna16 + awq is not supported "
+                        "for the current GPU. "
+                        f"Minimum capability: {awq_min_capability}. "
+                        f"Current capability: {device_capability}."
+                    )
         else:
             raise ValueError("moe_wna16 only support gptq and awq.")
 

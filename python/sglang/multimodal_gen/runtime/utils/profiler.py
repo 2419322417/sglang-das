@@ -49,6 +49,7 @@ class SGLDiffusionProfiler:
         num_steps: int | None = None,
         num_inference_steps: int | None = None,
         log_dir: str | None = None,
+        start_step: int = 0,
     ):
         self.request_id = request_id or "profile_trace"
         self.rank = rank
@@ -90,18 +91,23 @@ class SGLDiffusionProfiler:
             # profile denoising stage only
             warmup = 1
             num_actual_steps = num_inference_steps if num_steps == -1 else num_steps
-            self.num_active_steps = num_actual_steps + warmup
+            self.num_active_steps = start_step + num_actual_steps + warmup
             self.profiler = torch.profiler.profile(
                 **common_torch_profiler_args,
                 schedule=torch.profiler.schedule(
                     skip_first=0,
-                    wait=0,
+                    wait=start_step,
                     warmup=warmup,
-                    active=self.num_active_steps,
+                    active=num_actual_steps + warmup,
                     repeat=1,
                 ),
             )
-            self.profile_mode_id = f"{num_actual_steps} steps"
+            if start_step > 0:
+                self.profile_mode_id = (
+                    f"{num_actual_steps} steps from step {start_step}"
+                )
+            else:
+                self.profile_mode_id = f"{num_actual_steps} steps"
 
         logger.info(f"Profiling request: {request_id} for {self.profile_mode_id}...")
 

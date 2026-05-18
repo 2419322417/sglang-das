@@ -20,6 +20,7 @@ from sglang.srt.layers.moe import (
     MoeRunnerConfig,
     get_moe_a2a_backend,
     get_moe_runner_backend,
+    get_moe_a2a_backend
 )
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.quantization.base_config import (
@@ -45,8 +46,10 @@ if TYPE_CHECKING:
         CombineInput,
         StandardDispatchOutput,
     )
+from sglang.srt.utils import is_dcu
+_is_dcu = is_dcu()
 
-
+_use_marlin_w16a16_moe = get_bool_env_var("SGLANG_USE_MARLIN_W16A16_MOE")
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_hip = is_hip()
 _is_cpu = is_cpu()
@@ -157,6 +160,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
         elif _use_aiter and type(layer.weight.data) is torch.Tensor:
             return tgemm.mm(x, layer.weight, bias, otype=x.dtype)
 
+        if x.dtype != layer.weight.dtype:
+            x = x.to(layer.weight.dtype)
         return F.linear(x, layer.weight, bias)
 
 
@@ -176,6 +181,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         self.use_flashinfer_trtllm_moe = use_flashinfer_trtllm_moe
         self.use_deep_gemm = use_deep_gemm
         self._cache_permute_indices = dict({})
+        self.use_deepep = get_moe_a2a_backend().is_deepep()
 
     def create_weights(
         self,
@@ -317,6 +323,84 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             layer.w2_weight.data = layer.w2_weight.data.reshape(
                 layer.num_local_experts, *new_shape_w2
             )
+        if (_is_dcu and _use_marlin_w16a16_moe
+            and not self.use_deepep
+            and not getattr(layer, "use_nn_moe", False)
+            and not getattr(layer, "_marlin_w16a16_moe_packed", False)):
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            N = w1.shape[1]
+            if (w1.is_cuda and w2.is_cuda
+                    and w1.dtype in (torch.float16, torch.bfloat16)
+                    and w2.dtype in (torch.float16, torch.bfloat16)):
+                try:
+                    if w1.dim() != 3 or w2.dim() != 3 or w1.size(0) != w2.size(
+                            0):
+                        raise RuntimeError("Unexpected MoE weight shapes")
+                    twoN, K = w1.size(1), w1.size(2)
+                    if w2.size(1) != K:
+                        raise RuntimeError("Unexpected MoE w2 layout")
+                    N = w2.size(2)
+                    if twoN != 2 * N:
+                        raise RuntimeError("Unexpected MoE hidden dims")
+                    if (K % 16 != 0 or K % 32 != 0 or N % 16 != 0
+                            or twoN % 32 != 0):
+                        raise RuntimeError("Marlin packing requires alignment")
+
+                    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+                        w16a16_marlin_weight)
+                    from torch.nn.parameter import Parameter
+
+                    # def _pack_per_expert(weight: torch.Tensor) -> torch.Tensor:
+                    #     num_experts = weight.shape[0]
+                    #     packed0 = w16a16_marlin_weight(
+                    #         weight[0]).contiguous()
+                    #     packed = packed0.new_empty((num_experts, ) +
+                    #                                packed0.shape)
+                    #     packed[0].copy_(packed0)
+                    #     del packed0
+                    #     for i in range(1, num_experts):
+                    #         tmp = w16a16_marlin_weight(
+                    #             weight[i]).contiguous()
+                    #         packed[i].copy_(tmp)
+                    #         del tmp
+                    #     return packed
+                    def _pack_per_expert(weight: torch.Tensor) -> torch.Tensor:
+                        num_experts = weight.shape[0]
+                        for i in range(num_experts):
+                            new_expert = w16a16_marlin_weight(
+                                weight[i]).contiguous()
+                            weight.data[i].view(-1).copy_(new_expert.view(-1))
+                        weight = weight.reshape((-1,) + new_expert.shape)
+                        return weight
+
+                    with torch.no_grad():
+                        w1_packed = _pack_per_expert(w1)
+                        w2_packed = _pack_per_expert(w2)
+
+                        new_w1 = Parameter(w1_packed, requires_grad=False)
+                        new_w2 = Parameter(w2_packed, requires_grad=False)
+
+                        # Preserve any custom weight attributes (e.g. loaders).
+                        if hasattr(w1, "__dict__"):
+                            for k, v in w1.__dict__.items():
+                                setattr(new_w1, k, v)
+                        if hasattr(w2, "__dict__"):
+                            for k, v in w2.__dict__.items():
+                                setattr(new_w2, k, v)
+
+                        setattr(new_w1, "marlin_w16a16_packed", True)
+                        setattr(new_w1, "N", N)
+                        setattr(new_w2, "marlin_w16a16_packed", True)
+
+                        layer.w13_weight = new_w1
+                        layer.w2_weight = new_w2
+                        layer._marlin_w16a16_moe_packed = True
+                        return
+                except Exception:
+                    # If packing dependencies are unavailable, fall back to the
+                    # standard (non-Marlin) layouts.
+                    pass
 
         if _is_npu:
             for weight_name in ["w13_weight", "w2_weight"]:
@@ -488,31 +572,88 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             )
             return self.runner.run(dispatch_output, quant_info)
         else:
-            if self._aiter_runner is not None:
-                from sglang.srt.layers.moe.moe_runner.aiter import AiterMoeQuantInfo
+            # Skip aiter fused_moe when using non-auto MoE backend (e.g., triton, triton_kernels)
+            # because aiter CK kernels don't support all GEMM dimensions
+            _should_use_aiter_moe = _use_aiter and get_moe_runner_backend().is_auto()
+            if _should_use_aiter_moe:
+                assert not moe_runner_config.no_combine, "unsupported"
+                topk_weights, topk_ids, _ = topk_output
+                if moe_runner_config.apply_router_weight_on_input:
+                    assert (
+                        topk_weights.dim() == 2
+                    ), "`topk_weights` should be in shape (num_tokens, topk)"
+                    _, topk = topk_weights.shape
+                    assert (
+                        topk == 1
+                    ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+                    x = x * topk_weights.to(x.dtype)
+                    topk_weights = torch.ones_like(
+                        topk_weights, dtype=torch.float32
+                    )  # topk_weights must be FP32 (float32)
+                output = fused_moe(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights,
+                    topk_ids,
+                    activation=(
+                        ActivationType.Silu
+                        if moe_runner_config.activation == "silu"
+                        else ActivationType.Gelu
+                    ),
+                    expert_mask=layer.expert_mask_gpu,
+                )
+                return StandardCombineInput(hidden_states=output)
+            elif _is_dcu and _use_marlin_w16a16_moe:
+                    from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import fused_marlin_moe_w16a16
+                    K = x.size(1)
 
-                try:
-                    quant_info = AiterMoeQuantInfo(
-                        w13_weight=layer.w13_weight,
-                        w2_weight=layer.w2_weight,
-                        expert_mask=layer.dispatcher.expert_mask_gpu,
-                    )
-                    return self._aiter_runner.run(dispatch_output, quant_info)
-                except RuntimeError as e:
-                    # AITER CK fused_moe may not support all GEMM dimensions
-                    # (e.g. Gemma4 MoE with 128 experts x 704 intermediate size)
-                    logger.warning_once(
-                        f"AITER CK fused_moe failed ({e}), "
-                        "falling back to Triton MoE runner."
-                    )
+                    def _is_marlin_w16a16_packed(w1: torch.Tensor,
+                                                 w2: torch.Tensor) -> bool:
+                        if w1.dim() != 3 or w2.dim() != 3:
+                            return False
+                        if w1.size(0) != w2.size(0):
+                            return False
+                        k_div16 = w1.size(1)
+                        if k_div16 * 16 != K:
+                            return False
+                        if w1.size(2) % 16 != 0:
+                            return False
+                        twoN = w1.size(2) // 16
+                        if twoN % 2 != 0:
+                            return False
+                        N = twoN // 2
+                        if w2.size(2) != K * 16:
+                            return False
+                        if w2.size(1) * 16 != N:
+                            return False
+                        return True
 
-            quant_info = TritonMoeQuantInfo(
-                w13_weight=layer.w13_weight,
-                w2_weight=layer.w2_weight,
-                b13=getattr(layer, "w13_weight_bias", None),
-                b2=getattr(layer, "w2_weight_bias", None),
-            )
-            return self.runner.run(dispatch_output, quant_info)
+                    if (getattr(layer.w13_weight, "marlin_w16a16_packed", False)
+                        or getattr(layer.w2_weight, "marlin_w16a16_packed", False)
+                        or _is_marlin_w16a16_packed(layer.w13_weight, layer.w2_weight)):
+                        topk_weights, topk_ids, _ = topk_output
+                        origin_w1_shape = getattr(layer.w13_weight, "N", None)
+                        output = fused_marlin_moe_w16a16(
+                            hidden_states=x,
+                            w1=layer.w13_weight,
+                            w2=layer.w2_weight,
+                            topk_weights=topk_weights,
+                            topk_ids=topk_ids,
+                            global_num_experts=self.moe_runner_config.num_experts,
+                            origin_w1_shape=origin_w1_shape,
+                            routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
+                            inplace=True,
+                        )
+                        return StandardCombineInput(hidden_states=output)
+            else:
+                quant_info = TritonMoeQuantInfo(
+                    w13_weight=layer.w13_weight,
+                    w2_weight=layer.w2_weight,
+                    b13=getattr(layer, "w13_weight_bias", None),
+                    b2=getattr(layer, "w2_weight_bias", None),
+                )
+                return self.runner.run(dispatch_output, quant_info)
 
     def forward_cpu(
         self,

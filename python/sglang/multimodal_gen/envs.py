@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     SGLANG_DIFFUSION_LOGGING_CONFIG_PATH: str | None = None
     SGLANG_DIFFUSION_TRACE_FUNCTION: int = 0
     SGLANG_DIFFUSION_WORKER_MULTIPROC_METHOD: str = "fork"
+    SGLANG_DIFFUSION_RING_ATTN_OVERLAP: int = 0
     SGLANG_DIFFUSION_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -250,6 +251,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, sgl_diffusion will enable stage logging, which will print the time
     # taken for each stage
     "SGLANG_DIFFUSION_STAGE_LOGGING": _lazy_bool("SGLANG_DIFFUSION_STAGE_LOGGING"),
+    "SGLANG_DIFFUSION_RING_ATTN_OVERLAP": _lazy_int(
+        "SGLANG_DIFFUSION_RING_ATTN_OVERLAP", 0
+    ),
     "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D": _lazy_bool(
         "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D", "true"
     ),

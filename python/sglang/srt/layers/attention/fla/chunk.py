@@ -23,7 +23,6 @@ from sglang.srt.layers.attention.fla.utils import (
 
 CHUNK_SIZE = 64
 
-
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

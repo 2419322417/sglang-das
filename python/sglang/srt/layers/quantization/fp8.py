@@ -87,6 +87,7 @@ from sglang.srt.utils import (
     is_hip,
     is_musa,
     is_npu,
+    is_dcu,
     is_sm90_supported,
     is_sm100_supported,
     is_sm120_supported,
@@ -95,6 +96,16 @@ from sglang.srt.utils import (
     set_weight_attrs,
     use_intel_amx_backend,
 )
+if is_hip():
+    try:
+        from aiter.fused_moe_asm_wna16 import fused_experts_asm_impl
+        from aiter.ops.shuffle import asm_shuffle_weight_b8
+        import os
+        SGLANG_USE_AITER_FP8_ASM_MOE = os.getenv("SGLANG_USE_AITER_FP8_ASM_MOE", "0") == "1"
+    except ImportError:
+        SGLANG_USE_AITER_FP8_ASM_MOE = False
+else:
+    SGLANG_USE_AITER_FP8_ASM_MOE = False
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner.aiter import AiterMoeQuantInfo
@@ -108,11 +119,14 @@ _is_musa = is_musa()
 _is_npu = is_npu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
+_is_dcu = is_dcu()
 _is_fp8_fnuz = is_fp8_fnuz()
 _use_hip_int4 = get_bool_env_var("SGLANG_INT4_WEIGHT") and _is_hip
 _use_aiter = envs.SGLANG_USE_AITER.get() and _is_hip
 
-if _use_aiter or _use_hip_int4:
+if (_use_aiter or _use_hip_int4) and not _is_dcu:
+    from aiter import ActivationType, QuantType
+    from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
 
 if _use_aiter:
@@ -538,6 +552,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.weight_scale_inv.format_ue8m0 = True
             weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
 
+        from sglang.srt.layers.quantization.fp8_utils import hipblaslt_w8a8_block_fp8_linear
+
+        if self.w8a8_block_fp8_linear is hipblaslt_w8a8_block_fp8_linear:
+            weight = weight.T.contiguous()
+            weight_scale = weight_scale.T.contiguous()
         layer.weight.data = weight.data
         layer.weight_scale_inv.data = weight_scale.data
 
@@ -1147,23 +1166,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale, requires_grad=False
             )
             layer.w2_input_scale = None
-            if _use_aiter:
-                # add this section for MI300
-                # Pre-shuffle weights
-                layer.w13_weight.data = shuffle_weight(
-                    layer.w13_weight.contiguous(), (16, 16)
-                )
-                layer.w2_weight.data = shuffle_weight(
-                    layer.w2_weight.contiguous(), (16, 16)
-                )
-        elif _use_aiter:
+
+        if _use_aiter or SGLANG_USE_AITER_FP8_ASM_MOE:
             # Pre-shuffle weights
-            layer.w13_weight.data = shuffle_weight(
-                layer.w13_weight.contiguous(), (16, 16)
-            )
-            layer.w2_weight.data = shuffle_weight(
-                layer.w2_weight.contiguous(), (16, 16)
-            )
+            # t = shuffle_weight(layer.w13_weight, (16, 16))
+            # layer.w13_weight.copy_(t)
+            # del t
+            # t = shuffle_weight(layer.w2_weight, (16, 16))
+            # layer.w2_weight.copy_(t)
+            # del t
+            w13_weight = asm_shuffle_weight_b8(layer.w13_weight, 1)
+            layer.w13_weight.copy_(w13_weight)
+            del w13_weight
+            w2_weight = asm_shuffle_weight_b8(layer.w2_weight, 2)
+            layer.w2_weight.copy_(w2_weight)
+            del w2_weight
         elif _is_cpu:
             assert (
                 _is_cpu_amx_available
@@ -1922,10 +1939,50 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         no_combine: bool = False,
-    ) -> Optional["AiterMoeQuantInfo"]:
-        if not (_use_aiter or _use_hip_int4):
-            return None
-        assert not no_combine, f"{no_combine=} is not supported."
+    ) -> Optional[torch.Tensor]:
+        topk_weights, topk_ids, _ = topk_output
+        if self.block_quant and SGLANG_USE_AITER_FP8_ASM_MOE:
+            return fused_experts_asm_impl(x,
+                            layer.w13_weight,
+                            layer.w2_weight,
+                            topk_weights,
+                            topk_ids,
+                            x.dtype,
+                            False,
+                            activation,
+                            True,
+                            False,
+                            False,
+                            False,
+                            False,
+                            False,
+                            -1,
+                            None,
+                            layer.w13_weight_scale_inv,
+                            layer.w2_weight_scale_inv,
+                            None,
+                            None,
+                            layer.w13_input_scale,
+                            layer.w2_input_scale,
+                            (128,128),
+                            use_shuffle=True
+                )
+        if _use_hip_int4:
+            # TODO: add triton kernel and add check _use_aiter
+            assert not no_combine, f"{no_combine=} is not supported."
+            return fused_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                quant_type=QuantType.per_Token,
+                w1_scale=layer.w13_weight_scale1,
+                w2_scale=layer.w2_weight_scale1,
+                activation=(
+                    ActivationType.Silu if activation == "silu" else ActivationType.Gelu
+                ),
+            )
 
         from sglang.srt.layers.moe.moe_runner.aiter import (
             AiterMoeQuantInfo,

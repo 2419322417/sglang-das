@@ -246,6 +246,25 @@ class EAGLEDraftExtendCudaGraphRunner:
             is_bs_supported = is_bs_supported and forward_batch.can_run_dp_cuda_graph
 
         return is_bs_supported
+    
+    #nhb
+    def _create_graph(self):
+        return torch.cuda.CUDAGraph()
+
+    def _capture_init(self, run_once_fn):
+        for _ in range(2):
+            torch.cuda.synchronize()
+            self.model_runner.tp_group.barrier()
+            run_once_fn()
+
+    def _capture_graph(self, graph, pool, stream, run_once_fn):
+        with torch.cuda.graph(graph, pool=pool, stream=stream):
+            out = run_once_fn()
+        return out
+
+    def _replay(self, forward_batch: ForwardBatch):
+        self.graphs[self.bs].replay()
+
 
     def _create_graph(self):
         return torch.cuda.CUDAGraph()

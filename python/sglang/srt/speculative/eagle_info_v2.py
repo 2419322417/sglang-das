@@ -42,6 +42,12 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 _is_musa = is_musa()
 
+from sglang.srt.utils import get_bool_env_var
+from sgl_kernel.kvcacheio import dcu_assign_extend_cache_locs
+
+import logging
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from sglang.srt.managers.tp_worker import TpModelWorker
     from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
@@ -86,6 +92,7 @@ def assign_draft_cache_locs_page_size_1(
 
 @dataclass
 class EagleDraftInputV2Mixin:
+
     def prepare_for_decode(self: EagleDraftInput, batch: ScheduleBatch):
         batch.maybe_evict_swa()
 
@@ -256,24 +263,23 @@ class EagleDraftInputV2Mixin:
 
 @dataclass
 class EagleVerifyInputV2Mixin:
+
+    use_sglang_assign_extend_cache_locs = get_bool_env_var("SGLANG_ASSIGN_EXTEND_CACHE_LOCS", default="true")
+
     def prepare_for_v2_verify(
         self: EagleVerifyInput,
         req_to_token_pool: ReqToTokenPool,
         batch: ModelWorkerBatch,
         target_worker: TpModelWorker,
     ):
+        # Assign cache locations
         if not batch.forward_mode.is_idle():
-            # Assign cache locations
             bs = len(batch.req_pool_indices)
             batch.input_ids = self.draft_token
             device = batch.input_ids.device
-            batch.out_cache_loc = assign_extend_cache_locs_func(
-                req_pool_indices=batch.req_pool_indices,
-                req_to_token=req_to_token_pool.req_to_token,
-                start_offset=batch.seq_lens,
-                end_offset=batch.seq_lens + self.draft_token_num,
-                batch_size=bs,
-                draft_token_num=self.draft_token_num,
+            batch.out_cache_loc = torch.empty(
+                (bs * self.draft_token_num,),
+                dtype=torch.int64,
                 device=device,
             )
 
@@ -295,6 +301,26 @@ class EagleVerifyInputV2Mixin:
                 ].to(dtype=torch.int64)
                 batch.mamba_track_mask = None
                 batch.mamba_track_seqlens = None
+            if self.use_sglang_assign_extend_cache_locs:
+                dcu_assign_extend_cache_locs(
+                    batch.req_pool_indices,
+                    req_to_token_pool.req_to_token,
+                    batch.seq_lens,
+                    batch.seq_lens + self.draft_token_num,
+                    batch.out_cache_loc,
+                    req_to_token_pool.req_to_token.shape[1],
+                    bs,
+                )
+            else:
+                assign_extend_cache_locs[(bs,)](
+                    batch.req_pool_indices,
+                    req_to_token_pool.req_to_token,
+                    batch.seq_lens,
+                    batch.seq_lens + self.draft_token_num,
+                    batch.out_cache_loc,
+                    req_to_token_pool.req_to_token.shape[1],
+                    next_power_of_2(bs),
+                )
 
             # Populate seq_lens_cpu/seq_lens_sum on the verify input so that
             # TBO's split_spec_info can slice the custom_mask correctly.
@@ -383,7 +409,6 @@ class EagleVerifyInputV2Mixin:
             self.grammar.apply_vocab_mask(
                 logits=next_token_logits, vocab_mask=vocab_mask
             )
-
         candidates = self.draft_token.reshape(bs, self.draft_token_num)
         predict_shape = list(next_token_logits.shape)[:-1]
         predict = torch.zeros(predict_shape, dtype=torch.int32, device=device).flatten()
@@ -486,6 +511,95 @@ class EagleVerifyInputV2Mixin:
         # name no longer flips semantics mid-function (naming doc C2).
         return predict, num_correct_drafts + 1, accept_index
 
+
+#@torch.compile(dynamic=True, disable=_is_npu)  #disable on dcu, is cause large bubble
+def select_top_k_tokens_tmp(
+    i: int,
+    topk_p: torch.Tensor,
+    topk_index: torch.Tensor,
+    hidden_states: torch.Tensor,
+    scores: torch.Tensor,
+    topk: int,
+):
+    # FIXME(lsyin): remove this duplicate code
+    if i == 0:
+        # The first step after extend
+        input_ids = topk_index.flatten()
+        hidden_states = hidden_states.repeat_interleave(topk, dim=0)
+        scores = topk_p  # shape: (b, topk)
+
+        tree_info = (
+            topk_p.unsqueeze(1),  # shape: (b, 1, topk)
+            topk_index,  # shape: (b, topk)
+            torch.arange(-1, topk, dtype=torch.long, device=hidden_states.device)
+            .unsqueeze(0)
+            .repeat(topk_p.shape[0], 1),  # shape: (b, topk + 1)
+        )
+    else:
+        # The later decode steps
+        expand_scores = torch.mul(
+            scores.unsqueeze(2), topk_p.reshape(-1, topk, topk)
+        )  # (b, topk, 1) x (b, topk ,topk) -> (b, topk, topk)
+        topk_cs_p, topk_cs_index = fast_topk(
+            expand_scores.flatten(start_dim=1), topk, dim=-1
+        )  # (b, topk)
+        scores = topk_cs_p  # shape: (b, topk)
+
+        topk_index = topk_index.reshape(-1, topk**2)
+        input_ids = torch.gather(topk_index, index=topk_cs_index, dim=1).flatten()
+
+        selected_input_index = topk_cs_index.flatten() // topk + torch.arange(
+            0, hidden_states.shape[0], step=topk, device=hidden_states.device
+        ).repeat_interleave(topk)
+        hidden_states = hidden_states[selected_input_index, :]
+
+        tree_info = (
+            expand_scores,  # shape: (b, topk, topk)
+            topk_index,  # shape: (b, topk * topk)
+            topk_cs_index + (topk**2 * (i - 1) + topk),  # shape: (b, topk)
+        )
+
+    return input_ids, hidden_states, scores, tree_info
+
+#nhb
+def assign_extend_cache_locs_func(
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    start_offset: torch.Tensor,
+    end_offset: torch.Tensor,
+    batch_size: int,
+    draft_token_num: int,
+    device,
+) -> torch.Tensor:
+    if is_cuda() or is_hip() :
+        out_cache_loc = torch.empty(
+            (batch_size * draft_token_num,),
+            dtype=torch.int64,
+            device=device,
+        )
+        use_sglang_assign_extend_cache_locs = get_bool_env_var("SGLANG_ASSIGN_EXTEND_CACHE_LOCS", default="true")
+        if use_sglang_assign_extend_cache_locs:
+            dcu_assign_extend_cache_locs(
+                req_pool_indices,         
+                req_to_token,
+                start_offset,
+                start_offset + draft_token_num,
+                out_cache_loc,
+                req_to_token.shape[1],
+                batch_size,
+            )
+        else:
+            assign_extend_cache_locs[(batch_size,)](
+                req_pool_indices,         
+                req_to_token,
+                start_offset,
+                start_offset + draft_token_num,
+                out_cache_loc,
+                req_to_token.shape[1],
+                next_power_of_2(batch_size),
+            )
+
+        return out_cache_loc
 
 @triton.jit
 def fill_bonus_tokens(

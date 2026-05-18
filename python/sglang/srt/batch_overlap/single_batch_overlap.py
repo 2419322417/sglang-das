@@ -1,17 +1,3 @@
-# Copyright 2025 SGLang Team
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,7 +8,9 @@ import torch
 from sglang.srt.environ import envs
 from sglang.srt.layers.moe import get_moe_runner_backend
 from sglang.srt.layers.moe.utils import is_sbo_enabled
-from sglang.srt.utils import is_blackwell
+from sglang.srt.utils import is_blackwell, is_dcu
+
+_is_dcu = is_dcu()
 
 
 class SboFlags:
@@ -36,6 +24,7 @@ class SboFlags:
             and (
                 get_moe_runner_backend().is_flashinfer_cutedsl()
                 or (get_moe_runner_backend().is_deep_gemm() and not is_blackwell())
+                or _is_dcu
             )
         )
 

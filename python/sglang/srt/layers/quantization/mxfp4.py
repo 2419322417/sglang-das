@@ -49,6 +49,7 @@ from sglang.srt.utils import (
     is_flashinfer_available,
     is_gfx95_supported,
     is_hip,
+    is_dcu,
     is_sm90_supported,
     is_sm100_supported,
     is_sm120_supported,
@@ -140,10 +141,11 @@ if TYPE_CHECKING:
 
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_is_dcu = is_dcu()
 _is_shuffle_moe_mxfp4 = is_gfx95_supported()
 _sm120_mxfp4_min_warps_patched = False
 
-if _is_hip:
+if _is_hip and not _is_dcu:
     # import aiter
     try:
         from aiter.ops.shuffle import (

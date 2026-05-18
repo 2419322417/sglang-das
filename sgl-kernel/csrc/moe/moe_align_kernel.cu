@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "utils.h"
 
+#define WARP_SIZE 64
 #define VEC_SIZE 4
 using Vec = int4;
 
@@ -45,7 +46,7 @@ __device__ __forceinline__ int warp_exclusive_scan(int v, unsigned mask = 0xffff
   int original = v;
 #pragma unroll
   for (int offset = 1; offset < WARP_SIZE; offset <<= 1) {
-    int n = __shfl_up_sync(mask, v, offset);
+    int n = __shfl_up(v, offset);
     if ((threadIdx.x & (WARP_SIZE - 1)) >= offset) v += n;
   }
   return v - original;

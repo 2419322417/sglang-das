@@ -60,6 +60,8 @@ from sglang.srt.speculative.spec_utils import (
     maybe_detect_nan,
     maybe_detect_oob,
     select_top_k_tokens,
+    #nhb
+    generate_token_bitmask
 )
 from sglang.srt.utils.common import (
     MultiprocessingSerializer,
@@ -363,14 +365,12 @@ class EagleDraftWorker(BaseDraftWorker):
             parent_list, top_scores_index, draft_tokens = self.draft_forward(
                 forward_batch
             )
-
         if model_worker_batch.forward_mode.is_idle():
             return EagleVerifyInput.create_idle_input(
                 self.topk,
                 self.speculative_num_steps,
                 self.speculative_num_draft_tokens,
             )
-
         # Build tree mask
         # Directly write to cuda graph buffers for verify attn
         tree_mask_buf, position_buf = (
@@ -614,6 +614,9 @@ class EagleDraftWorker(BaseDraftWorker):
             draft_logits_output = self.draft_runner.forward(
                 forward_batch, skip_attn_backend_init=True
             ).logits_output
+            # draft_logits_output, _ = self.draft_runner.forward(
+            #     forward_batch, skip_attn_backend_init=False
+            # )
 
         maybe_detect_nan(
             draft_logits_output.next_token_logits,
@@ -756,7 +759,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             batch_output = self.target_worker.forward_batch_generation(
                 model_worker_batch
             )
-
+            
             # Draft prefill
             draft_capture_mode = (
                 CaptureHiddenMode.NULL

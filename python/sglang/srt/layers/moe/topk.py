@@ -28,6 +28,9 @@ from typing import (
     runtime_checkable,
 )
 
+import numpy as np
+from numpy import dtype
+
 import torch
 import torch.nn.functional as F
 
@@ -101,6 +104,7 @@ from sglang.srt.layers.moe.utils import is_deepep_class_backend
 from sglang.srt.layers.utils import MultiPlatformOp
 from sglang.srt.state_capturer.routed_experts import get_global_experts_capturer
 from sglang.srt.utils import (
+    direct_register_custom_op,
     cpu_has_amx_support,
     get_bool_env_var,
     get_compiler_backend,
@@ -108,18 +112,24 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_musa,
+    is_dcu,
     is_npu,
     is_xpu,
 )
 from sglang.srt.utils.patch_torch import register_fake_if_exists
+import random
+import os
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization import QuantizationConfig
+from sglang.srt.distributed import get_tp_group
+from sglang.srt.layers.dp_attention import get_attention_dp_rank,get_attention_dp_size
 
 
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
+_is_dcu = is_dcu()
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_xpu = is_xpu()
@@ -127,6 +137,9 @@ _is_npu = is_npu()
 _is_xpu = is_xpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_musa = is_musa()
+_use_lightop = get_bool_env_var("SGLANG_USE_LIGHTOP")
+simulated_expert_balance = get_bool_env_var("SGLANG_SIMULATED_EXPERT_BALANCE")
+_use_fused_topk_softmax = get_bool_env_var("SGLANG_USE_FUSED_TOPK_SOFTMAX")
 
 if _is_cuda:
     from sgl_kernel import moe_fused_gate
@@ -191,6 +204,40 @@ if _is_musa:
         raise ImportError("mate is required for the biased grouped topk.")
 
     from sglang.srt.hardware_backend.musa.kernels.topk import topk_sigmoid, topk_softmax
+if _use_lightop:
+    from lightop import op as op
+
+
+def moe_fused_gate_dcu(gating_output: torch.Tensor, correction_bias: torch.Tensor, num_expert_group: int,
+                                   topk_group: int, topk: int,
+                                   num_fused_shared_experts: int, routed_scaling_factor: float) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_weights, topk_ids = op.moe_fused_gate(
+            gating_output,
+            correction_bias,
+            num_expert_group,
+            topk_group,
+            topk,
+            num_fused_shared_experts,
+            routed_scaling_factor,
+        )
+    return topk_weights, topk_ids
+
+def moe_fused_gate_fake(gating_output: torch.Tensor, correction_bias: torch.Tensor, num_expert_group: int,
+                                   topk_group: int, topk: int,
+                                   num_fused_shared_experts: int, routed_scaling_factor: float) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty((gating_output.size(0), topk),
+                           dtype=gating_output.dtype,
+                           device=gating_output.device), \
+                    torch.empty((gating_output.size(0), topk),
+                           dtype=gating_output.dtype,
+                           device=gating_output.device)
+direct_register_custom_op(
+        op_name="moe_fused_gate_dcu",
+        op_func=moe_fused_gate_dcu,
+        mutates_args=[],
+        fake_impl=moe_fused_gate_fake,
+    )
+
 
 # -------------------------------- TopKConfig ---------------------------------------
 
@@ -640,6 +687,15 @@ def fused_topk(
                 renormalize,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
+            )
+        elif _is_dcu and _use_fused_topk_softmax:
+            from lightop import op
+            op.topk_softmax(
+                topk_weights,
+                topk_ids,
+                None,
+                gating_output,
+                renormalize,
             )
         else:
             topk_softmax(
@@ -1118,15 +1174,23 @@ def biased_grouped_topk_gpu(
     ):
         topk_weights, topk_ids = moe_fused_gate(
             gating_output.to(dtype=torch.float32),
-            correction_bias,
-            num_expert_group,
-            topk_group,
-            topk,
             num_fused_shared_experts,
             routed_scaling_factor if routed_scaling_factor is not None else 1.0,
             True,
             apply_routed_scaling_factor_on_output,
         )
+    elif _use_lightop:
+        assert not apply_routed_scaling_factor_on_output, "Not implemented"
+        topk_weights, topk_ids = torch.ops.sglang.moe_fused_gate_dcu(
+            gating_output,
+            correction_bias,
+            num_expert_group,
+            topk_group,
+            topk,
+            num_fused_shared_experts, 
+            routed_scaling_factor,
+        )
+        return topk_weights, topk_ids
     else:
         # Use optimized path for Kimi K2 (384 experts with num_expert_group=1)
         num_experts = gating_output.shape[1]
@@ -1388,7 +1452,7 @@ def select_experts(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 correction_bias=correction_bias,
-                topk=num_routed_topk if _use_aiter else top_k,
+                topk=num_routed_topk,
                 renormalize=renormalize,
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
@@ -1396,6 +1460,7 @@ def select_experts(
                 routed_scaling_factor=routed_scaling_factor,
                 apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
             )
+
     elif torch_native and custom_routing_function is None:
         assert (
             num_token_non_padded is None
@@ -1476,6 +1541,25 @@ def select_experts(
         layer_id=layer_id,
         expert_location_dispatch_info=expert_location_dispatch_info,
     )
+    # if num_fused_shared_experts > 0 and _use_aiter:
+    #     M, N = router_logits.shape
+    #     scale_factor = (
+    #         1.0
+    #         if fused_shared_experts_scaling_factor is None
+    #         else fused_shared_experts_scaling_factor
+    #     )
+
+    #     # Lazy import to avoid circular-import issues
+    #     from sglang.srt.layers.moe.fused_moe_triton.fused_moe_triton_kernels import (
+    #         fused_append_shared_experts,
+    #     )
+    #     topk_ids, topk_weights = fused_append_shared_experts(
+    #         topk_ids,
+    #         topk_weights,
+    #         num_fused_shared_experts,
+    #         scale_factor,
+    #         N,  # base id for shared experts
+    #     )
 
     get_global_expert_distribution_recorder().on_select_experts(topk_ids=topk_ids)
 
@@ -1526,3 +1610,12 @@ if _is_cuda:
             dtype=torch.int32,
         )
         return topk_weights, topk_ids
+def batch_write_expert_counts(expert_count: torch.Tensor, num_token: int):
+    # 合并所有token的expert_count并写入文件
+    rank = torch.distributed.get_rank()
+    basedir = f"/shangxl/Test/eplb_recorder/{rank}"
+    os.makedirs(basedir, exist_ok=True)
+    file_path = os.path.join(basedir, "expert_activation_counts.txt")
+    with open(file_path, "w") as f:
+        f.write(f"After processing token {num_token}:\n")
+        f.write(f"expert_count: {expert_count.cpu().numpy().tolist()}\n")

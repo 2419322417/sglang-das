@@ -305,6 +305,7 @@ class Envs:
     ENABLE_ASCEND_TRANSFER_WITH_MOONCAKE = EnvBool(False)
     ASCEND_NPU_PHY_ID = EnvInt(-1)
     SGLANG_MOONCAKE_SEND_AUX_TCP = EnvBool(False)
+    SGLANG_KV_LAYOUT_DCU_FA = EnvBool(True)
 
     # Mooncake Store
     SGLANG_HICACHE_MOONCAKE_CONFIG_PATH = EnvStr(None)
@@ -331,6 +332,9 @@ class Envs:
     # Enable dual-stream MoE (shared experts vs routed experts) on the
     # ROCm/AITER path. Requires GPU_MAX_HW_QUEUES>=5 to avoid HW-queue serialization.
     SGLANG_ROCM_USE_MULTI_STREAM = EnvBool(False)
+    
+    # DCU Lightop
+    SGLANG_USE_LIGHTOP = EnvBool(False)
 
     # MPS (Apple Silicon)
     SGLANG_USE_MLX = EnvBool(False)
@@ -348,6 +352,19 @@ class Envs:
     # Quantize x to int8 in the dispatch operator
     DEEP_NORMAL_MODE_USE_INT8_QUANT = EnvBool(False)
     SGLANG_NPU_FUSED_MOE_MODE = EnvInt(1)
+    # Fused
+    SGLANG_USE_LIGHTOP_MOE_SUM_MUL_ADD = EnvBool(False)
+    SGLANG_USE_OPT_CAT = EnvBool(False)
+    SGLANG_USE_FUSED_MLA_CAT = EnvBool(False)
+    SGLANG_USE_FUSED_RMS_QUANT = EnvBool(False)
+    SGLANG_USE_FUSED_SILU_MUL_QUANT = EnvBool(False)
+    SGLANG_USE_FUSED_BAILING_RMS_QUANT = EnvBool(False)
+    SGLANG_USE_FUSED_BAILING_SILU_MUL_FP8_QUANT = EnvBool(False)
+    SGLANG_USE_FUSED_RMS_ROTARY = EnvBool(False)
+    SGLANG_USE_FUSED_TOPK_SOFTMAX = EnvBool(False)
+    SGLANG_USE_FUSED_RESHAPE_TO_FLOAT = EnvBool(False)
+    SGLANG_USE_AITER_LINEAR_ATTN = EnvBool(False)
+
 
     # MTHREADS & MUSA
     SGLANG_MUSA_FA3_FORCE_UPDATE_METADATA = EnvBool(False)
@@ -407,7 +424,7 @@ class Envs:
     SGLANG_DEEPGEMM_SANITY_CHECK = EnvBool(False)
 
     # DeepSeek MHA Optimization
-    SGLANG_CHUNKED_PREFIX_CACHE_THRESHOLD = EnvInt(8192)
+    SGLANG_CHUNKED_PREFIX_CACHE_THRESHOLD = EnvInt(0)
     SGLANG_MAX_KV_CHUNK_CAPACITY = EnvInt(128 * 1024)
 
     # DeepEP

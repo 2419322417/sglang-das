@@ -85,6 +85,7 @@ from sglang.srt.server_args import get_global_server_args
 # Utils
 from sglang.srt.utils import (
     LazyValue,
+    get_bool_env_var,
     add_prefix,
     cpu_has_amx_support,
     get_bool_env_var,
@@ -92,20 +93,27 @@ from sglang.srt.utils import (
     is_cuda,
     is_gfx95_supported,
     is_hip,
+    is_dcu,
     is_npu,
     make_layers,
     set_weight_attrs,
 )
 from sglang.srt.utils.hf_transformers_utils import get_processor, get_rope_config
 
+_use_fused_qwen_bailing_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
+
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
+_is_dcu = is_dcu()
 _is_npu = is_npu()
 _is_cpu = is_cpu()
 _is_gfx95 = is_gfx95_supported()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_amx_available = cpu_has_amx_support()
+
+if _is_dcu and _use_fused_qwen_bailing_rotary:
+    from lightop import gammarms_rotary_embedding_fuse_with_kv_store
 
 cached_get_processor = lru_cache(get_processor)
 
@@ -803,6 +811,13 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         self.alt_stream = alt_stream
+        self.page_size = 64
+        if get_global_server_args().kv_cache_dtype == "fp8_e4m3":
+            self.kv_cache_dtype = torch.float8_e4m3fn
+        elif get_global_server_args().kv_cache_dtype == "fp8_e5m2":
+            self.kv_cache_dtype = torch.float8_e5m2
+        elif get_global_server_args().kv_cache_dtype in ("bf16", "bfloat16"):
+            self.kv_cache_dtype = torch.bfloat16
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
@@ -855,9 +870,44 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             gate = gate.reshape(*orig_shape, -1)
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            
+        if _is_dcu and _use_fused_qwen_bailing_rotary:
+            # Fused RMSNorm + RoPE + kv_store path through custom op.
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            if (cos_sin_cache.device != q.device
+                    or cos_sin_cache.dtype != q.dtype):
+                cos_sin_cache = cos_sin_cache.to(q.device,
+                                                dtype=q.dtype,
+                                                non_blocking=True)
+                # Persist the converted cache so we don't re-copy/re-allocate
+                # on every forward when the original buffer starts on CPU.
+                self.rotary_emb.cos_sin_cache = cos_sin_cache
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(self.layer_id)
 
-        q, k = self._apply_qk_norm(q, k)
-        q, k = self.rotary_emb(positions, q, k)
+            q, k, v = gammarms_rotary_embedding_fuse_with_kv_store(
+                positions,
+                q,
+                k,
+                v,
+                cos_sin_cache,
+                self.head_dim,
+                self.page_size,
+                k_buffer,
+                v_buffer,
+                forward_batch.out_cache_loc,
+                is_neox=True,
+                weight_q=self.q_norm.weight,
+                weight_k=self.k_norm.weight,
+                output_dtype=self.kv_cache_dtype,
+                residual_q=None,
+                residual_k=None,
+                k_scale=None,
+                v_scale=None,
+                epsilon=self.q_norm.variance_epsilon,
+            )
+        else:
+            q, k = self._apply_qk_norm(q, k)
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, forward_batch)
 
         if self.attn_output_gate:

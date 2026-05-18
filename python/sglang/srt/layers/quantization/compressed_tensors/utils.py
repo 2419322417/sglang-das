@@ -120,11 +120,18 @@ def find_matched_target(
     if layer_name is None:
         layer_name = ""
 
-    matched_target = (
-        _find_first_match(layer_name, targets)
-        or _find_first_match(module.__class__.__name__, targets, True)
-        or _match_fused_layer(layer_name, targets, fused_mapping)
-    )
+    matched_target = _find_first_match(layer_name, targets)
+
+    if matched_target is None:
+        for cls in type(module).mro():
+            if cls is object:
+                continue
+            matched_target = _find_first_match(cls.__name__, targets, True)
+            if matched_target is not None:
+                break
+
+    if matched_target is None:
+        matched_target = _match_fused_layer(layer_name, targets, fused_mapping)
 
     if matched_target is None:
         raise ValueError(

@@ -47,6 +47,8 @@ from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
 from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
+from sglang.srt.layers.quantization.slimquant_w4a8_marlin import SlimQuantW4A8Int8MarlinConfig
+from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_marlin import SlimQuantCompressedTensorsMarlinConfig
 from sglang.srt.utils import (
     cpu_has_amx_support,
     is_cuda,
@@ -84,12 +86,15 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "w4afp8": W4AFp8Config,
     "petit_nvfp4": PetitNvFp4Config,
     "fbgemm_fp8": FBGEMMFp8Config,
-    "quark": QuarkConfig,
+    # "quark": QuarkConfig,
     "auto-round": AutoRoundConfig,
     "modelslim": ModelSlimConfig,
     "quark_int4fp8_moe": QuarkInt4Fp8Config,
+    "slimquant_w4a8_marlin": SlimQuantW4A8Int8MarlinConfig,
+    "slimquant_marlin": SlimQuantCompressedTensorsMarlinConfig,
 }
-
+if QuarkConfig is not None:
+    BASE_QUANTIZATION_METHODS["quark"] = QuarkConfig
 
 if is_cuda() or (_is_mxfp_supported and is_hip()):
     BASE_QUANTIZATION_METHODS.update(
@@ -115,6 +120,15 @@ CPU_QUANTIZATION_METHODS = {
     "awq": AWQCPUConfig,
     "gptq": CPUGPTQConfig,
 }
+
+if is_npu():
+    from sglang.srt.hardware_backend.npu.quantization.modelslim import ModelSlimConfig
+
+    BASE_QUANTIZATION_METHODS.update(
+        {
+            "modelslim": ModelSlimConfig,
+        }
+    )
 
 QUANTIZATION_METHODS = {**BASE_QUANTIZATION_METHODS}
 

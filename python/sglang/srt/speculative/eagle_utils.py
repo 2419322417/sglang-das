@@ -158,7 +158,6 @@ def build_tree_kernel_efficient(
         draft_tokens,
     )
 
-
 def verify_tree_greedy_func(
     predicts: torch.Tensor,
     accept_index: torch.Tensor,

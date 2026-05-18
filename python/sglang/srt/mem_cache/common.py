@@ -14,6 +14,8 @@ from sglang.srt.mem_cache.swa_memory_pool import SWATokenToKVPoolAllocator
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import is_hip, support_triton
 from sglang.srt.utils.common import ceil_align
+from sglang.srt.utils import support_triton,get_bool_env_var
+from sgl_kernel.kvcacheio import dcu_get_last_loc
 
 _is_hip = is_hip()
 
@@ -175,8 +177,16 @@ def get_last_loc(
     if uses_triton_dispatch:
         impl = get_last_loc_triton
     else:
-        impl = get_last_loc_torch
-
+        if (
+            get_global_server_args().attention_backend != "ascend"
+            and get_global_server_args().attention_backend != "torch_native"
+        ):
+            impl = get_last_loc_triton
+        else:
+            impl = get_last_loc_torch
+    use_sglang_get_last_loc = get_bool_env_var("SGLANG_GET_LAST_LOC", default="true")
+    if use_sglang_get_last_loc:
+        impl = dcu_get_last_loc
     return impl(req_to_token, req_pool_indices_tensor, prefix_lens_tensor)
 
 
@@ -445,15 +455,15 @@ def alloc_for_extend(
     # Create tensors for allocation
     prefix_lens_cpu = torch.tensor(batch.prefix_lens, dtype=torch.int64)
     extend_lens_cpu = torch.tensor(batch.extend_lens, dtype=torch.int64)
-    prefix_lens_device = prefix_lens_cpu.to(batch.device, non_blocking=True)
-    extend_lens_device = extend_lens_cpu.to(batch.device, non_blocking=True)
+    prefix_lens_device = prefix_lens_cpu.pin_memory().to(batch.device, non_blocking=True)
+    extend_lens_device = extend_lens_cpu.pin_memory().to(batch.device, non_blocking=True)
 
     # Allocate req slots
     req_pool_indices = alloc_req_slots(
         batch.req_to_token_pool, batch.reqs, batch.tree_cache
     )
     req_pool_indices_cpu = torch.tensor(req_pool_indices, dtype=torch.int64)
-    req_pool_indices_device = req_pool_indices_cpu.to(batch.device, non_blocking=True)
+    req_pool_indices_device = req_pool_indices_cpu.pin_memory().to(batch.device, non_blocking=True)
 
     # Allocate KV cache (throws exception on failure)
     if batch.tree_cache.page_size == 1:
@@ -461,7 +471,8 @@ def alloc_for_extend(
     else:
         # Paged allocation - build last_loc
         last_loc = [
-            (t[-1:] if len(t) > 0 else torch.tensor([-1], device=batch.device))
+            # (t[-1:] if len(t) > 0 else torch.tensor([-1], device=batch.device))
+            (t[-1:] if len(t) > 0 else batch.loc_tensor)
             for t in prefix_tensors
         ]
         out_cache_loc = alloc_paged_token_slots_extend(

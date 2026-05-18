@@ -4,6 +4,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 from typing import Callable, Optional
+import os
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
@@ -75,6 +76,7 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
         self.has_g_idx = actorder == ActivationOrdering.GROUP
+        self.use_triton_gemm = os.getenv("SGLANG_GPTQ_MARLIN_USE_TRITON", "0") == "1"
 
         if self.group_size == -1 and self.strategy != "channel":
             raise ValueError("Marlin kernels require group quantization or "
@@ -218,6 +220,17 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
         device = getattr(layer, self.w_q_name).device
         c = self.kernel_config
 
+        if self.use_triton_gemm:
+            layer.weight_packed = torch.nn.Parameter(layer.weight_packed.data, requires_grad=False)
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data, requires_grad=False)
+            if not self.symmetric:
+                layer.weight_zero_point = torch.nn.Parameter(layer.weight_zero_point.data, requires_grad=False)
+            if self.has_g_idx:
+                layer.weight_g_idx = torch.nn.Parameter(layer.weight_g_idx.data, requires_grad=False)
+            layer.g_idx_sort_indices = torch.empty((0,), dtype=torch.int32, device=device)
+            self.workspace = torch.empty((0,), dtype=torch.int32, device=device)
+            return
+
         check_marlin_supports_shape(
             c.partition_weight_shape[1],  # out_features
             c.partition_weight_shape[0],  # in_features
@@ -321,6 +334,21 @@ class CompressedTensorsWNA16(CompressedTensorsLinearScheme):
             )
 
         w_q, w_s, w_zp, w_gidx = _get_weight_params(layer)
+
+        if self.use_triton_gemm:
+            from sglang.srt.layers.quantization.gptq_triton import gptq_gemm_triton
+            logger.info_once(f"Using GPTQ Triton backend instead of GPTQ Marlin backend")
+            out = gptq_gemm_triton(
+                x,
+                w_q,
+                w_s,
+                c.weight_type,
+                w_zp,
+                w_gidx,
+            )
+            if bias is not None:
+                out = out + bias
+            return out
 
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin

@@ -27,8 +27,8 @@ from sglang.srt.layers.quantization.utils import (
     per_tensor_dequantize,
     swap_w13_to_w31,
 )
-from sglang.srt.utils import get_bool_env_var, is_hip, set_weight_attrs
-
+from sglang.srt.utils import get_bool_env_var, is_hip, is_dcu, set_weight_attrs
+from sglang.srt.server_args import get_global_server_args
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -39,14 +39,27 @@ if TYPE_CHECKING:
 __all__ = ["CompressedTensorsW8A8Fp8MoE"]
 
 _is_hip = is_hip()
+_is_dcu = is_dcu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
-
-if _use_aiter:
+_use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
+_use_aiter_fp8_w8a8_moe = get_bool_env_var("SGLANG_ROCM_USE_AITER_MOE")
+if _use_aiter_fp8_w8a8_moe:
+    import aiter
+    from aiter.moe import (
+        get_aiter_moe_config,
+        aiter_moe,
+        MoeSolutionType,
+        MoeQuantType,
+            )
+if _use_aiter and not _is_dcu:
     from aiter.ops.shuffle import shuffle_weight
 
 
 logger = logging.getLogger(__name__)
 
+def is_moe_prefill():
+    args = get_global_server_args()
+    return args.disaggregation_mode == "prefill"
 
 class CompressedTensorsW8A8Fp8MoE(CompressedTensorsMoEScheme):
 
@@ -70,6 +83,7 @@ class CompressedTensorsW8A8Fp8MoE(CompressedTensorsMoEScheme):
         else:
             self.weight_block_size = None
         self.block_quant = self.weight_block_size is not None
+        self.use_deepep = get_moe_a2a_backend().is_deepep()
 
         self.static_input_scales = not self.input_quant.dynamic
         if self.static_input_scales and per_channel:
@@ -326,6 +340,79 @@ class CompressedTensorsW8A8Fp8MoE(CompressedTensorsMoEScheme):
                     requires_grad=False,
                 )
                 torch.cuda.empty_cache()
+        if (_use_fp8_w8a8_moe and _is_dcu
+            and not getattr(layer, "_w8a8_fp8_packed", False)):
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_shape = w1.shape
+            w2_shape = w2.shape
+            if (w1.is_cuda and w2.is_cuda):
+                if w1.dim() != 3 or w2.dim() != 3 or w1.size(0) != w2.size(
+                    0):
+                    raise RuntimeError("Unexpected MoE weight shapes")
+                twoN, K = w1.size(1), w1.size(2)
+                if w2.size(1) != K:
+                    raise RuntimeError("Unexpected MoE w2 layout")
+                N = w2.size(2)
+                if twoN != 2 * N:
+                    raise RuntimeError("Unexpected MoE hidden dims")
+                if (K % 16 != 0 or K % 32 != 0 or N % 16 != 0
+                    or twoN % 32 != 0):
+                    raise RuntimeError("Marlin packing requires alignment")
+
+                from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
+                    w8a8_2_marlin_weight, weight8bit_nt_kpack2_marlin,weight8bit_nt_kpack2_marlin1)
+                from torch.nn.parameter import Parameter
+
+                def _pack_per_expert(weight: torch.Tensor) -> torch.Tensor:
+                    num_experts = weight.shape[0]
+                    for i in range(num_experts):
+                        new_expert = w8a8_2_marlin_weight(
+                            weight[i]).contiguous()
+                        weight.data[i].view(-1).copy_(new_expert.view(-1))
+                    weight = weight.reshape((-1,) + new_expert.shape)
+
+                    return weight
+
+                def _pack_per_expert_deepep(weight: torch.Tensor) -> torch.Tensor:
+                    num_experts = weight.shape[0]
+                    for i in range(num_experts):
+                        if is_moe_prefill() :
+                            new_expert = weight8bit_nt_kpack2_marlin(
+                                weight[i]).contiguous()
+                        else:
+                            new_expert = weight8bit_nt_kpack2_marlin1(
+                                weight[i]).contiguous()
+                        weight.data[i].view(-1).copy_(new_expert.view(-1))
+                    weight = weight.reshape((-1,) + new_expert.shape)
+                    return weight
+
+                with torch.no_grad():
+                    if self.use_deepep:
+                        w1_packed = _pack_per_expert_deepep(w1)
+                        w2_packed = _pack_per_expert_deepep(w2)
+                    else:
+                        w1_packed = _pack_per_expert(w1)
+                        w2_packed = _pack_per_expert(w2)
+
+                    new_w1 = Parameter(w1_packed, requires_grad=False)
+                    new_w2 = Parameter(w2_packed, requires_grad=False)
+
+                    if hasattr(w1, "__dict__"):
+                        for k, v in w1.__dict__.items():
+                            setattr(new_w1, k, v)
+                    if hasattr(w2, "__dict__"):
+                        for k, v in w2.__dict__.items():
+                            setattr(new_w2, k, v)
+
+                    setattr(new_w1, "_w8a8_fp8_packed", True)
+                    setattr(new_w1, "w1_shape", w1_shape)
+                    setattr(new_w2, "_w8a8_fp8_packed", True)
+                    setattr(new_w2, "w2_shape", w2_shape)
+
+                    layer.w13_weight = new_w1
+                    layer.w2_weight = new_w2
+                    layer._w8a8_fp8_packed = True
 
         if (
             self.weight_quant.strategy == QuantizationStrategy.BLOCK
@@ -370,6 +457,9 @@ class CompressedTensorsW8A8Fp8MoE(CompressedTensorsMoEScheme):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
+        bias: Optional[torch.Tensor] = None,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
     ) -> CombineInput:
 
         x = dispatch_output.hidden_states
@@ -427,6 +517,130 @@ class CompressedTensorsW8A8Fp8MoE(CompressedTensorsMoEScheme):
                     block_shape=self.weight_block_size,
                 )
             return self.runner.run(dispatch_output, quant_info)
+        elif _is_dcu and _use_fp8_w8a8_moe:
+            if (getattr(layer.w13_weight, "_w8a8_fp8_packed", False)
+                or getattr(layer.w2_weight, "_w8a8_fp8_packed", False)):
+                topk_weights, topk_ids, _ = topk_output
+                use_prequant_input = i_q is not None and i_s is not None
+                if moe_runner_config.apply_router_weight_on_input:
+                    assert topk_weights.dim() == 2, "`topk_weights` should be (num_tokens, topk)"
+                    _, tk = topk_weights.shape
+                    assert tk == 1, "DCU marlin path: apply_router_weight_on_input requires topk=1"
+                    x = x * topk_weights.to(x.dtype)
+                    topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+                    # Router-weighted input no longer matches precomputed rms-quant activations.
+                    use_prequant_input = False
+                from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_moe_fp8_w8a8
+                origin_w1_shape = getattr(layer.w13_weight, "w1_shape", None)
+                origin_w2_shape = getattr(layer.w2_weight, "w2_shape", None)
+                output = fused_moe_fp8_w8a8(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    w1_scale=layer.w13_weight_scale,
+                    w2_scale=layer.w2_weight_scale,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    global_num_experts=self.moe_runner_config.num_experts,
+                    inplace=True,
+                    origin_w1_shape=origin_w1_shape,
+                    origin_w2_shape=origin_w2_shape,
+                    routed_scaling_factor=moe_runner_config.routed_scaling_factor,
+                    bias=bias,
+                    hidden_states_fp8_input=i_q if use_prequant_input else None,
+                    hidden_states_scale_fp8_input=i_s if use_prequant_input else None,
+                )
+                return StandardCombineInput(hidden_states=output)
+        elif  _is_dcu and not _use_fp8_w8a8_moe and _use_aiter_fp8_w8a8_moe:
+            if isinstance(layer.w13_weight,tuple):
+                w1=layer.w13_weight[0]
+                w2=layer.w2_weight[0]
+            else:
+                w1=layer.w13_weight
+                w2=layer.w2_weight
+            topk_weights, topk_ids, _ = topk_output
+            if moe_runner_config.apply_router_weight_on_input:
+                assert topk_weights.dim() == 2, "`topk_weights` should be (num_tokens, topk)"
+                _, tk = topk_weights.shape
+                assert tk == 1, "DCU marlin path: apply_router_weight_on_input requires topk=1"
+                x = x * topk_weights.to(x.dtype)
+                topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
+                # Router-weighted input no longer matches precomputed rms-quant activations.
+                use_prequant_input = False
+            if isinstance(layer.w13_weight_scale, tuple):
+                w1_scale=layer.w13_weight_scale[0]
+                w2_scale=layer.w2_weight_scale[0]
+            else:
+                w1_scale=layer.w13_weight_scale
+                w2_scale=layer.w2_weight_scale
+            M, K = x.shape 
+            E = self.moe_runner_config.num_experts
+            top_k = topk_ids.shape[1]
+            N1 = w1.shape[1]
+            N2 = w2.shape[1]
+            activation="silu" if moe_runner_config.activation == "silu" else "gelu"
+            # -----------------------------------------------------------------
+            # Query backend config
+            # ------------------------------------------------------------------
+            status, moe_cfg = get_aiter_moe_config(
+                M=M,
+                E=E,
+                N1=N1,
+                N2=N2,
+                K=K,
+                top_k=top_k,
+                block_size=0,
+                dtype=x.dtype,
+                quant_type=MoeQuantType.FP8_W8A8,
+            )
+            if not status:
+                raise RuntimeError(
+                "[aiter_moe_fp8_w8a8] no suitable backend found: "
+                f"M={M}, N1={N1}, N2={N2}, K={K}, "
+                f"E={E}, topk={top_k}")
+            if moe_cfg.solution_type not in {
+                MoeSolutionType.MOE_C,
+                MoeSolutionType.ASM,
+                MoeSolutionType.TRITON,
+                MoeSolutionType.CK,
+            }:
+                raise RuntimeError(
+                    f"Unsupported solution_type: {moe_cfg.solution_type}"
+                )
+            # for debug：
+            # aiter.logger.info(f"moe_cfg.solution_type {moe_cfg.solution_type}")
+            #在 moe_c 后端需要对weight做shuffle，如果不做此 shuffle 直接传入 moe_c_fused_experts，
+            #底层 Marlin/CUDA kernel 会按错误的内存偏移读取权重，导致结果错误。
+            if moe_cfg.solution_type==MoeSolutionType.MOE_C:
+                from aiter.ops.shuffle import moe_layout_shuffle_gemm1,moe_layout_shuffle_gemm2
+                if not getattr(layer, "_moec_shuffled", False):
+                    layer.w13_weight.data = moe_layout_shuffle_gemm1(layer.w13_weight.data).view(*layer.w13_weight.data.shape)
+                    layer.w2_weight.data = moe_layout_shuffle_gemm2(layer.w2_weight.data).view(*layer.w2_weight.data.shape)
+                    layer._moec_shuffled = True
+                w1 = layer.w13_weight
+                w2 = layer.w2_weight
+            if moe_cfg.quant_type != MoeQuantType.FP8_W8A8:
+                raise RuntimeError(
+                    f"Unexpected quant_type: {moe_cfg.quant_type}"
+                )
+            if moe_runner_config.routed_scaling_factor is None:
+                moe_runner_config.routed_scaling_factor=1.0
+            output=aiter_moe(
+                hidden_states=x,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                moe_config=moe_cfg,
+                inplace=True,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                activation=activation,
+                block_shape=None,
+                global_num_experts=E,
+                routed_scaling_factor=moe_runner_config.routed_scaling_factor,
+            )
+            return StandardCombineInput(hidden_states=output)
         else:
             quant_info = TritonMoeQuantInfo(
                 w13_weight=layer.w13_weight,

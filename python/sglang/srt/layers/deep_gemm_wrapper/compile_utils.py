@@ -305,7 +305,7 @@ class _NormalWarmupExecutor(_BaseWarmupExecutor):
         self.out = torch.empty((max_m, n), device="cuda", dtype=torch.bfloat16)
 
     def execute(self, m):
-        deep_gemm.fp8_gemm_nt(
+        deep_gemm.fp8_gemm(
             (self.lhs_q[:m], self.lhs_s[:m]),
             (self.rhs_q, self.rhs_s),
             self.out[:m],
