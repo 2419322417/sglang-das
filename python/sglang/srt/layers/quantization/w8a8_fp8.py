@@ -58,12 +58,12 @@ _is_dcu = is_dcu()
 _use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
 
 try:
-    from lmslim.layers.fused_moe.fuse_moe_w4a8_marlin import (  # noqa: F401
+    from lightop.moe import (  # noqa: F401
         fused_experts_impl_w4a8_marlin,
     )
 except Exception:
     print(
-        "INFO: Please install lmslim if you want to infer the quantitative model of moe.\n"
+        "INFO: Please install lightop if you want to infer the quantitative model of moe.\n"
     )
 
 

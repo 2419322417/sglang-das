@@ -113,7 +113,7 @@ _is_npu = is_npu()
 
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 
 if _is_dcu:
     from lightop.rmsnorm import fused_rms_norm_contiguous

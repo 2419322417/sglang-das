@@ -61,12 +61,12 @@ _use_fused_dpskv4_silu_mul_fp8_quant = get_bool_env_var("SGLANG_USE_FUSED_DPSKV4
 
 if _use_fused_rms_quant:
     try:
-        from lmslim.quantize.quant_ops import lm_faster_rmsquant
+        from lightop.norm import lm_faster_rmsquant
     except Exception as e:
         print(f"Error: Import fused rmsquant error: {e}")
 if _use_fused_silu_mul_quant:
     try:
-        from lmslim.quantize.quant_ops import lm_fuse_silu_mul_quant
+        from lightop.activation import lm_fuse_silu_mul_quant
     except Exception as e:
         print(f"Error: Import fused silu_mul_quant error: {e}")
 

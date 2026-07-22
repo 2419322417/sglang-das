@@ -34,7 +34,7 @@ from sglang.srt.layers.quantization.int8_kernel import (
     # per_token_quant_int8,
     sglang_per_token_group_quant_int8,
 )
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 from sglang.srt.utils import (
     cpu_has_amx_support,
     get_bool_env_var,

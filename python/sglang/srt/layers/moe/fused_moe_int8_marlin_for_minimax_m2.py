@@ -21,7 +21,7 @@ from vllm import _custom_ops as ops
 import torch
 import triton
 import triton.language as tl
-import lmslim.envs as lsenvs
+from lightop import envs as lsenvs
 
 use_lightop = lsenvs.LMSLIM_USE_LIGHTOP
 device_name = lsenvs.LMSLIM_GPU_NAME
@@ -30,7 +30,7 @@ if use_lightop:
     from lightop import moe_gemm_marlin_w8a8, get_moe_cuda_marlin_config, fuse_silu_mul_quant
     from lightop import op as op
 
-from lmslim.layers.gemm.int8_utils import (
+from lightop.quant import (
    per_token_group_quant_int8, per_token_quant_int8)
 
 import importlib.util as _iu, os as _os, sys as _sys, vllm
