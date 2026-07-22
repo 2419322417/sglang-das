@@ -96,7 +96,7 @@ class MLPSyncBatchInfo:
             )
 
         if self.scheduler_step_info is not None and device == "cpu":
-            # Use list all_gather for ROCm/DCU Gloo builds where _allgather_base may be unavailable.
+            # Use list all_gather for ROCm/HCU Gloo builds where _allgather_base may be unavailable.
             gathered = [
                 torch.empty_like(local_info_tensor)
                 for _ in range(actual_world)
