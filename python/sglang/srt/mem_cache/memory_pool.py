@@ -1881,7 +1881,7 @@ class MLATokenToKVPool(KVCache):
             )
         elif self.nsa_kv_cache_store_fp8:
             if _is_dcu:
-                from lightop import op
+                from lightop import kvcache as op
                 op.fused_quantize_and_store_mla_kv_cache(
                     cache_k_nope, 
                     cache_k_rope, 

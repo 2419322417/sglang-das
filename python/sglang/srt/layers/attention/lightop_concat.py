@@ -24,11 +24,11 @@ _USE_OPT_CAT = get_bool_env_var("SGLANG_USE_OPT_CAT")
 
 if _USE_OPT_CAT:
     try:
-        from lightop import ds_cat  # type: ignore
+        from lightop.tensor import ds_cat  # type: ignore
     except ImportError:  # pragma: no cover
         ds_cat = None
         warnings.warn(
-            "SGLANG_USE_OPT_CAT 已开启但无法导入 lightop.ds_cat，退回 torch.cat"
+            "SGLANG_USE_OPT_CAT 已开启但无法导入 lightop.tensor.ds_cat，退回 torch.cat"
         )
 else:
     ds_cat = None

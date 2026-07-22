@@ -276,7 +276,7 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                 fast_topk_v2,
             )
         else:
-            from lightop import fast_topk_transform_fused, fast_topk_transform_ragged_fused
+            from lightop.attention import fast_topk_transform_fused, fast_topk_transform_ragged_fused
             from sgl_kernel import fast_topk_v2
 
         if topk_indices_offset_override is not None:

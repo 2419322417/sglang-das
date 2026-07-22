@@ -30,7 +30,7 @@ _is_musa = is_musa()
 if _is_cuda or _is_hip or _is_xpu or _is_musa:
     from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
 if _is_dcu:
-    from lightop import op as op
+    from lightop import moe as op
 
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
@@ -188,19 +188,21 @@ def dcu_moe_align_block_size(
                                       device=topk_ids.device)
 
     if expert_mask is not None:
-        op.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
+        op.moe_align_block_size_out(topk_ids, num_experts, block_size, sorted_ids,
                                 expert_ids, num_tokens_post_pad,
                                 expert_map = expert_map,
                                 expert_mask = expert_mask,
                                 num_local_tokens = None,
-                                Is_fuse_fill = True)
+                                is_ep = False,
+                                is_fuse_fill = True)
     else:
-        op.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
+        op.moe_align_block_size_out(topk_ids, num_experts, block_size, sorted_ids,
                             expert_ids, num_tokens_post_pad,
                             expert_map = None,
                             expert_mask = None,
                             num_local_tokens = None,
-                            Is_fuse_fill = True)
+                            is_ep = False,
+                            is_fuse_fill = True)
         if expert_map is not None:
             expert_ids = expert_map[expert_ids]
 

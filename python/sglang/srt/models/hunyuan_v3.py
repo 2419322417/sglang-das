@@ -78,7 +78,7 @@ _is_dcu = is_dcu()
 _use_fused_hunyuan_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 
 if _is_dcu:
-    from lightop import rms_rotary_embedding_fuse_with_kv_store
+    from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 
 class HYV3FeedForward(nn.Module):

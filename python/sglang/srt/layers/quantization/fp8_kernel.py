@@ -45,7 +45,7 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.patch_torch import register_fake_if_exists
-from lightop import op
+from lightop.quant import per_token_quant_fp8 as lightop_per_token_quant_fp8
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -2033,8 +2033,12 @@ else:
                 output = torch.empty_like(input, device=input.device, dtype=fp8_dtype)
                 if (not input.is_contiguous()): 
                     input = input.contiguous()
-                op.per_token_quant_fp8(output, input, scale)
-                # output, scale = per_token_quant_fp8(input.contiguous())
+                output, scale = lightop_per_token_quant_fp8(
+                    input,
+                    dtype=output.dtype,
+                    out_q=output,
+                    out_scale=scale,
+                )
             else:
                 scale = torch.zeros(1, device=input.device, dtype=torch.float32)
                 sgl_per_tensor_quant_fp8(

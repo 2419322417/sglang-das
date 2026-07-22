@@ -3061,7 +3061,7 @@ def normal_decode_set_metadata_lightop(
         page_size > 0 and (page_size & (page_size - 1)) == 0
     ), f"page_size must be a power of two, got {page_size}"
     use_swa = swa_page_table is not None and token_to_kv_pool is not None
-    from lightop import fused_metadata_kernel_general    
+    from lightop.kvcache import fused_metadata_kernel_general
     fused_metadata_kernel_general(
         seq_lens=seq_lens,
         req_to_token=req_to_token,

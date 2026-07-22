@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from lightop import get_moe_cuda_marlin_config, moe_gemm_marlin_w8a8_fp8
+from lightop.moe import get_moe_cuda_marlin_config, moe_gemm_marlin_w8a8_fp8
 
 from sglang.srt.environ import envs
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
@@ -1528,7 +1528,7 @@ def fused_moe_fp8_w8a8(
             topk,
             cuda_config1,
         )
-        from lightop import fuse_silu_mul_fp8_quant
+        from lightop.activation import fuse_silu_mul_fp8_quant
 
         fp8_cache2, fp8_cache2_scale = fuse_silu_mul_fp8_quant(
             intermediate_cache1, fp8type=0
@@ -1551,7 +1551,7 @@ def fused_moe_fp8_w8a8(
 
         if routed_scaling_factor is None:
             routed_scaling_factor = 1.0
-        from lightop import op as ops  # 报错缺少ops
+        from lightop import moe as ops  # 报错缺少ops
 
         ops.moe_sum(
             intermediate_cache3,

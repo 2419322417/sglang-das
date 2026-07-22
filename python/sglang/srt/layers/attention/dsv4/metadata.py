@@ -128,7 +128,7 @@ class PagedIndexerMetadata:
             if envs.SGLANG_OPT_USE_JIT_INDEXER_METADATA.get():
                 from sglang.jit_kernel.deepseek_v4 import get_paged_mqa_logits_metadata
             else:
-                from lightop.gemmopt import get_paged_mqa_logits_metadata
+                from lightop.attention import get_paged_mqa_logits_metadata
 
             _c4 = self.c4_seq_lens.to(torch.int32)
             if _c4.dim() == 1:

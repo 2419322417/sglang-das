@@ -67,9 +67,8 @@ if _use_aiter and not _use_aiter_preshuffle:
     )
 _is_dcu = is_dcu()
 if _is_dcu:
-    import lightop
-    from lightop import gemmopt
-    from lightop import op
+    from lightop import attention as lightop_attention
+    from lightop import kvcache as lightop_kvcache
     from sglang.srt.layers.attention.nsa.triton_kernel import (
         fused_get_logits_head_gate_triton,
         hadamard_transform_optimized,
@@ -425,7 +424,7 @@ class Indexer(MultiPlatformOp):
             if key.ndim == 2:
                 key = key.view(key.shape[0], -1, self.head_dim)
 
-            op.fuse_layernorm_rotary_embedding(
+            lightop_attention.fuse_layernorm_rotary_embedding(
                 positions,
                 query,
                 key,
@@ -624,7 +623,7 @@ class Indexer(MultiPlatformOp):
             # BF16 decode follows the vLLM ROCm pattern:
             # keep the indexer K cache in paged BF16 layout and pass it directly
             # to the paged kernel, instead of packing an fp8+scale buffer first.
-            logits = gemmopt.paged_mqa_logits(
+            logits = lightop_attention.paged_mqa_logits(
                 q[:q_offset].unsqueeze(1),
                 kv_cache,
                 # The BF16 path expects dense per-head weights in fp32.
@@ -679,7 +678,7 @@ class Indexer(MultiPlatformOp):
                 )
             elif _is_dcu:
 
-                logits = gemmopt.paged_mqa_logits(
+                logits = lightop_attention.paged_mqa_logits(
                             q_fp8[:q_offset],
                             kv_cache_fp8,
                             weights[:q_offset],
@@ -831,7 +830,7 @@ class Indexer(MultiPlatformOp):
                 if use_bf16_index_cache:
                     # BF16 ragged path uses scale=None because K is already stored
                     # as full-precision BF16 values instead of fp8 payload + scale.
-                    logits = op.mqa_logits(
+                    logits = lightop_attention.mqa_logits(
                         q[:q_offset],
                         kv_bf16,
                         weights[:q_offset].to(torch.float32),
@@ -853,7 +852,7 @@ class Indexer(MultiPlatformOp):
                     )
                 elif _is_dcu:
                     kv, scale = kv_fp8
-                    logits = op.mqa_logits(
+                    logits = lightop_attention.mqa_logits(
                         q[:q_offset],
                         kv,
                         weights[:q_offset],
@@ -908,7 +907,7 @@ class Indexer(MultiPlatformOp):
                 if use_bf16_index_cache:
                     # Chunked BF16 ragged path is the same kernel contract as above:
                     # continuous BF16 K, fp32 weights, and no quant scale tensor.
-                    logits_chunk = op.mqa_logits(
+                    logits_chunk = lightop_attention.mqa_logits(
                         q[start:end],
                         kv_bf16,
                         weights[start:end].to(torch.float32),
@@ -935,7 +934,7 @@ class Indexer(MultiPlatformOp):
                     )
                 elif _is_dcu:
                     kv, scale = kv_fp8
-                    logits_chunk = lightop.mqa_logits(
+                    logits_chunk = lightop_attention.mqa_logits(
                         q[start:end],
                         kv,
                         weights[start:end],
@@ -1120,7 +1119,7 @@ class Indexer(MultiPlatformOp):
                     kv_bf16 = torch.cat(k_bf16_list, dim=0)
                     # CP ragged BF16 path also bypasses fp8 packing: concatenate the
                     # gathered BF16 K chunks, then call mqa_logits with scale=None.
-                    logits = op.mqa_logits(
+                    logits = lightop_attention.mqa_logits(
                         q,
                         kv_bf16,
                         weights.to(torch.float32),
@@ -1177,7 +1176,7 @@ class Indexer(MultiPlatformOp):
                 if use_bf16_index_cache:
                     # Single-chunk CP ragged BF16 path mirrors the multi-chunk case:
                     # direct BF16 K input and no quant scale tensor.
-                    logits = op.mqa_logits(
+                    logits = lightop_attention.mqa_logits(
                         q,
                         k_fp8,
                         weights.to(torch.float32),
@@ -1198,7 +1197,7 @@ class Indexer(MultiPlatformOp):
                     )
                     k_fp8 = k_fp8.view(torch.float8_e4m3fn)
                     k_scale = k_scale.view(torch.float32).squeeze(-1)
-                    logits = lightop.mqa_logits(
+                    logits = lightop_attention.mqa_logits(
                         q,
                         k_fp8,
                         weights,
@@ -1392,7 +1391,7 @@ class Indexer(MultiPlatformOp):
                 layer_id=layer_id
             )
             is_e4m3 = not _is_fp8_fnuz
-            op.fuse_act_quant_and_store_index_k_cache(
+            lightop_kvcache.fuse_act_quant_and_store_index_k_cache(
                 key,                                      # input
                 buf,                                      # buf
                 forward_batch.out_cache_loc,              # loc
@@ -1517,7 +1516,7 @@ class Indexer(MultiPlatformOp):
                     fused_q_scale = hadamard_scale * self.softmax_scale
                     fused_k_scale = hadamard_scale
 
-                    q_fp8, q_scale, weights = op.fuse_qk_quant_and_store_index_k_cache(
+                    q_fp8, q_scale, weights = lightop_kvcache.fuse_qk_quant_and_store_index_k_cache(
                             query,
                             key,
                             k_buf,
@@ -1584,7 +1583,7 @@ class Indexer(MultiPlatformOp):
                     fused_q_scale = hadamard_scale * self.softmax_scale
                     fused_k_scale = hadamard_scale
 
-                    q_fp8, q_scale, _ = op.fuse_qk_quant_and_store_index_k_cache(
+                    q_fp8, q_scale, _ = lightop_kvcache.fuse_qk_quant_and_store_index_k_cache(
                         query,
                         key,
                         k_buf,

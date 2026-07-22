@@ -84,10 +84,10 @@ if TYPE_CHECKING:
 from deepgemm import m_grouped_w4a8_gemm_nt_masked, m_grouped_w8a8_gemm_nt_masked, \
     m_grouped_fp8_gemm_nt_masked, m_grouped_bf16_gemm_nt_masked, m_grouped_fp8_gemm_nt_contiguous, \
     m_grouped_bf16_gemm_nt_contiguous
-from lightop import m_grouped_w8a8_gemm_nt_contig_asm as m_grouped_i8_gemm_nt_contiguous
-from lightop import fuse_silu_mul_quant_ep, fuse_silu_mul_quant, fuse_silu_mul_fp8_quant_ep, fuse_silu_and_mul, \
+from lightop.gemm_ops import m_grouped_w8a8_gemm_nt_contig_asm as m_grouped_i8_gemm_nt_contiguous
+from lightop.activation import fuse_silu_mul_quant_ep, fuse_silu_mul_quant, fuse_silu_mul_fp8_quant_ep, fuse_silu_and_mul, \
     fuse_silu_mul_fp8_quant
-from lightop import op as lightop_op
+from lightop import moe as lightop_op
 from lightop.quant import per_token_quant_int8
 from deepgemm.m_group_gemm import grouped_gemm_w4a16_nt_masked_entry
 

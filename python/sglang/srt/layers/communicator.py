@@ -106,7 +106,7 @@ _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _use_fused_bailing_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_RMS_QUANT")
 
 if _use_fused_bailing_rms_quant:
-    from lightop import rms_norm_per_token_fp8_quant
+    from lightop.norm import rms_norm_per_token_fp8_quant
 
 def _fused_rmsnorm_fp8_per_token_quant(
     hidden_states: torch.Tensor,

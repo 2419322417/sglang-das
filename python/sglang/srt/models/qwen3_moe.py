@@ -103,7 +103,7 @@ if _is_cuda:
     )
 
 if _is_dcu:
-    from lightop import rms_rotary_embedding_fuse_with_kv_store
+    from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 TConfig = TypeVar("TConfig", bound=PretrainedConfig)
 

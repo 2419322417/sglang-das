@@ -88,7 +88,7 @@ from sglang.srt.utils import (
 
 _is_dcu = is_dcu()
 if _is_dcu:
-    from lightop import mimo_v2_split_rope_vscale_kv_store
+    from lightop.attention import mimo_v2_split_rope_vscale_kv_store
 
     _use_lightop_rotary_embedding_fuse = get_bool_env_var(
         "SGLANG_USE_FUSED_RMSNORM_ROPE"

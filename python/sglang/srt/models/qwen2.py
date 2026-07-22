@@ -55,7 +55,7 @@ from sglang.srt.utils import add_prefix, make_layers,is_dcu,get_bool_env_var
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 _is_dcu = is_dcu()
 if _is_dcu:
-    from lightop import split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant
+    from lightop.attention import split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant
 _use_fused_rms_rotary=get_bool_env_var("SGLANG_USE_FUSED_SPLIT_QKV_RMS_ROTARY_EMBEDDING")
 
 Qwen2Config = None
