@@ -6840,9 +6840,9 @@ class ServerArgs:
             choices=["auto", "native", "aiter", "off"],
             help=(
                 "Choose the custom all-reduce backend. "
-                "'auto' picks aiter on HIP/DCU when available otherwise the "
+                "'auto' picks aiter on HIP/HCU when available otherwise the "
                 "native SGLang implementation; 'native' forces the SGLang "
-                "kernel; 'aiter' forces the Hygon/DCU aiter kernel and, when "
+                "kernel; 'aiter' forces the Hygon/HCU aiter kernel and, when "
                 "AITER_AR_TRANSPORT=fabric, fails hard rather than silently "
                 "falling back; 'off' disables custom all-reduce entirely. "
                 "--disable-custom-all-reduce overrides this and forces 'off'."
