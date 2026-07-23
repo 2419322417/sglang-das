@@ -1021,7 +1021,7 @@ class Scheduler(
         )
         from sglang.srt.mem_cache.memory_pool_host import (
             MHATokenToKVPoolHost,
-            MHATokenToKVPoolHostDCU,
+            MHATokenToKVPoolHostHCU,
             MLATokenToKVPoolHost,
         )
 
@@ -1040,10 +1040,10 @@ class Scheduler(
             layout=layout,
         )
         if isinstance(pool, MHATokenToKVPool):
-            # layout_dcu requires DCU host pool (same as hybrid_pool_assembler)
+            # layout_hcu requires HCU host pool (same as hybrid_pool_assembler)
             cls = (
-                MHATokenToKVPoolHostDCU
-                if layout == "layout_dcu"
+                MHATokenToKVPoolHostHCU
+                if layout == "layout_hcu"
                 else MHATokenToKVPoolHost
             )
             draft_host_pool = cls(pool, **kw)

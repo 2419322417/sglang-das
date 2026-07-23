@@ -350,7 +350,7 @@ def dispatch_custom_allreduce(backend: str = "auto"):
     Backends (see doc §5 / §6.4):
         - ``off``    : return ``None``; caller must not construct CA.
         - ``native`` : force SGLang's own CA (or JIT V2 on CUDA), ignoring aiter.
-        - ``aiter``  : force aiter CA on HIP/DCU. Raises on non-HIP or when the
+        - ``aiter``  : force aiter CA on HIP/HCU. Raises on non-HIP or when the
                        aiter package cannot be imported. The caller is
                        responsible for re-raising vs. falling back based on
                        ``AITER_AR_TRANSPORT`` (strict-Fabric semantics live in

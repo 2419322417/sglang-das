@@ -97,7 +97,7 @@ GLM51_COOKBOOK_ENV = {
     "SGLANG_ENABLE_SPEC_V2": "1",
     "HSA_ENABLE_COREDUMP": "1",
     "USE_HCU_CUSTOM_ALLREDUCE": "1",
-    # Legacy DCU env above; the auto backend + SGLANG_USE_AITER_AR promotion
+    # Legacy compatibility env above; the auto backend + SGLANG_USE_AITER_AR promotion
     # in ServerArgs makes the aiter path the default when aiter is installed.
     "SGLANG_USE_AITER_AR": "1",
     "ALLREDUCE_STREAM_WITH_COMPUTE": "1",
@@ -127,7 +127,7 @@ GLM51_COOKBOOK_ENV = {
 
 DEEPSEEK_V32_COOKBOOK_ENV = {
     "USE_HCU_CUSTOM_ALLREDUCE": "1",
-    # Legacy DCU env above; auto backend + SGLANG_USE_AITER_AR promotion in
+    # Legacy compatibility env above; auto backend + SGLANG_USE_AITER_AR promotion in
     # ServerArgs selects aiter when installed.
     "SGLANG_USE_AITER_AR": "1",
     "SGL_CHUNKED_PREFIX_CACHE_THRESHOLD": "0",
@@ -166,7 +166,7 @@ DEEPSEEK_V32_COOKBOOK_ENV = {
 MINIMAX_M25_COOKBOOK_ENV = {
     "SGLANG_USE_MODELSCOPE": "1",
     "USE_HCU_CUSTOM_ALLREDUCE": "1",
-    # Legacy DCU env above; auto backend + SGLANG_USE_AITER_AR promotion in
+    # Legacy compatibility env above; auto backend + SGLANG_USE_AITER_AR promotion in
     # ServerArgs selects aiter when installed.
     "SGLANG_USE_AITER_AR": "1",
     "SGL_CHUNKED_PREFIX_CACHE_THRESHOLD": "0",
@@ -191,7 +191,7 @@ KIMI_K26_COOKBOOK_ENV = {
     "SGLANG_USE_LIGHTOP": "1",
     "SGLANG_USE_OPT_CAT": "1",
     "USE_HCU_CUSTOM_ALLREDUCE": "1",
-    # Legacy DCU env above; auto backend + SGLANG_USE_AITER_AR promotion in
+    # Legacy compatibility env above; auto backend + SGLANG_USE_AITER_AR promotion in
     # ServerArgs selects aiter when installed.
     "SGLANG_USE_AITER_AR": "1",
     "SGL_CHUNKED_PREFIX_CACHE_THRESHOLD": "0",
