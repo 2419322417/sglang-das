@@ -25,13 +25,13 @@ from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph impo
 )
 from sglang.srt.utils import (
     is_cuda,
-    is_dcu,
+    is_hcu,
     is_hip,
     is_musa,
     log_info_on_rank0,
 )
 _is_cuda = is_cuda()
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 _is_hip = is_hip()
 _is_musa = is_musa()
 
@@ -351,7 +351,7 @@ def dispatch_custom_allreduce(
     Backends (see doc §5 / §6.4):
         - ``off``    : return ``None``; caller must not construct CA.
         - ``native`` : force SGLang's own CA (or JIT V2 on CUDA), ignoring aiter.
-        - ``aiter``  : force aiter CA on HIP/DCU. Raises on non-HIP or when the
+        - ``aiter``  : force aiter CA on HIP/HCU. Raises on non-HIP or when the
                        aiter package cannot be imported. The caller is
                        responsible for re-raising vs. falling back based on
                        ``AITER_AR_TRANSPORT`` (strict-Fabric semantics live in
@@ -410,9 +410,9 @@ def dispatch_custom_allreduce(
                 transport,
             )
             enable_reg = False
-        if _is_dcu:
+        if _is_hcu:
             logger.info(
-                "[AR] Using AiterCustomAllreduce (DCU/DTK, transport=%s, "
+                "[AR] Using AiterCustomAllreduce (HCU/DTK, transport=%s, "
                 "enable_register_for_capturing=%s)",
                 transport,
                 enable_reg,

@@ -6,7 +6,7 @@
 - Upstream version: v0.5.12
 - License: Apache License, Version 2.0
 - Original copyright: Copyright 2023-2024 SGLang Team
-- Hygon modifications: DCU platform adaptations, build scripts, dependency adjustments, performance optimizations, and documentation updates.
+- Hygon modifications: HCU platform adaptations, build scripts, dependency adjustments, performance optimizations, and documentation updates.
 
 ## vLLM
 
@@ -61,6 +61,12 @@
 - Source: https://github.com/openai/simple-evals
 - License: MIT License
 - Usage: simple evaluation helpers include Simple Evals-attributed implementations.
+
+## OpenAI HumanEval
+
+- Source: https://github.com/openai/human-eval
+- License: MIT License
+- Usage: the restricted HCU HumanEval correctness judge adapts HumanEval's execution guard and per-sample correctness-check structure.
 
 ## OmniServe / QServe
 

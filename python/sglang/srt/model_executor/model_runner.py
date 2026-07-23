@@ -281,7 +281,7 @@ MLA_ATTENTION_BACKENDS = [
     "flashmla",
     "cutedsl_mla",
     "cutlass_mla",
-    "dcu_mla",
+    "hcu_mla",
     "trtllm_mla",
     "tokenspeed_mla",
     "ascend",
