@@ -787,7 +787,10 @@ QWEN3_VL_32B_INSTRUCT = HcuCookbookModelConfig(
 QWEN25_VL_72B_W8A8 = HcuCookbookModelConfig(
     name="Qwen2.5-VL-72B-Instruct-W8A8",
     env_name="SGLANG_HCU_QWEN25_VL_72B_W8A8_MODEL",
-    default_path="/public/opendas/DL_DATA/llm-models/vllm-w8a8-models/Qwen2.5-VL-72B-Instruct-quantized.w8a8",
+    default_path=(
+        "/public/opendas/DL_DATA/llm-models/vllm-gptq-models/qwen2.5/"
+        "Qwen2.5-VL-72B-Instruct-quantized.w8a8"
+    ),
     tp_size=8,
     timeout=7200,
     dtype_or_quant="w8a8",

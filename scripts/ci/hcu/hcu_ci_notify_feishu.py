@@ -307,11 +307,40 @@ def _percent(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def _card_column(content: str, weight: int) -> dict:
+    return {
+        "tag": "column",
+        "width": "weighted",
+        "weight": weight,
+        "vertical_align": "top",
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": content},
+            }
+        ],
+    }
+
+
+def _column_set(columns: List[Tuple[str, int]], *, grey: bool = False) -> dict:
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "background_style": "grey" if grey else "default",
+        "columns": [_card_column(content, weight) for content, weight in columns],
+    }
+
+
+def _short_image_id(image_id: str) -> str:
+    compact = _single_line(image_id).removeprefix("sha256:")
+    return compact[:12] or "unknown"
+
+
 def _overall_status(
     collected: CollectedResults, workflow_result: str
 ) -> Tuple[str, str, str]:
     if collected.regressions:
-        return "red", "精度回归", "存在模型分数低于阈值"
+        return "red", "存在未达标", "存在模型精度低于阈值"
     has_infra_issue = bool(
         collected.missing_models
         or collected.diagnostics
@@ -337,10 +366,11 @@ def build_card(
     workflow_result: str,
     run_url: str,
 ) -> dict:
-    color, status, status_detail = _overall_status(collected, workflow_result)
+    color, _, _ = _overall_status(collected, workflow_result)
     passed_count = sum(result.passed for result in collected.results.values())
     regression_count = len(collected.regressions)
     missing_count = len(collected.missing_models)
+    completed_count = len(collected.results)
     image_ids = sorted(
         {
             status.image_id
@@ -348,69 +378,123 @@ def build_card(
             if status.image_id
         }
     )
-    resolved_image = ", ".join(image_ids) if image_ids else "unknown"
-
-    overview = (
-        f"**结果**：{status}（通过 {passed_count} / 回归 {regression_count} / "
-        f"缺失 {missing_count}）\n"
-        f"**说明**：{status_detail}\n"
-        f"**工作流分支**：{_single_line(branch)}\n"
-        f"**测试 ref**：{_single_line(target_ref)}\n"
-        f"**提交**：{_single_line(commit_sha[:12] or 'unknown')}\n"
-        f"**镜像**：{_single_line(image)}\n"
-        f"**镜像 ID**：{_single_line(resolved_image)}\n"
-        f"**矩阵状态**：{_single_line(workflow_result)}"
+    resolved_image = (
+        ", ".join(_short_image_id(image_id) for image_id in image_ids)
+        if image_ids
+        else "unknown"
     )
 
-    result_lines = []
+    if regression_count:
+        conclusion_parts = [f"{regression_count} 个模型未达到阈值"]
+        if missing_count:
+            conclusion_parts.append(f"{missing_count} 个模型未完成")
+        conclusion = "本次" + "，".join(conclusion_parts) + "。"
+    elif missing_count:
+        conclusion = (
+            f"已完成的 {completed_count} 个模型全部达到阈值，"
+            f"{missing_count} 个模型未完成。"
+        )
+    elif color == "orange":
+        conclusion = (
+            f"已完成的 {completed_count} 个模型全部达到阈值，"
+            "本次结果状态不完整。"
+        )
+    else:
+        conclusion = f"本次 {completed_count} 个模型全部达到阈值。"
+
+    summary = _column_set(
+        [
+            (f"<font color='green'>**{passed_count}**</font>\n通过", 1),
+            (
+                f"<font color='{'red' if regression_count else 'grey'}'>"
+                f"**{regression_count}**</font>\n未达标",
+                1,
+            ),
+            (
+                f"<font color='{'orange' if missing_count else 'grey'}'>"
+                f"**{missing_count}**</font>\n未完成",
+                1,
+            ),
+        ],
+        grey=True,
+    )
+
+    table_rows = [
+        _column_set(
+            [
+                ("**模型**", 6),
+                ("**精度**", 2),
+                ("**阈值**", 2),
+                ("**样本数**", 2),
+                ("**结论**", 2),
+            ],
+            grey=True,
+        )
+    ]
     for model_key, display_name in EXPECTED_MODELS:
         result = collected.results.get(model_key)
         if result is None:
-            result_lines.append(f"- **{display_name}**：结果缺失")
-            continue
-        row_status = "通过" if result.passed else "精度回归"
-        sample_note = (
-            f"，样本 {result.num_examples}" if result.num_examples is not None else ""
-        )
-        result_lines.append(
-            f"- **{display_name}**：{_percent(result.score)} / "
-            f"{_percent(result.threshold)}，{row_status}{sample_note}"
-        )
+            row = [
+                (display_name, 6),
+                ("--", 2),
+                ("--", 2),
+                ("--", 2),
+                ("<font color='orange'>未完成</font>", 2),
+            ]
+        else:
+            row_status = (
+                "<font color='green'>通过</font>"
+                if result.passed
+                else "<font color='red'>未达标</font>"
+            )
+            row = [
+                (display_name, 6),
+                (_percent(result.score), 2),
+                (_percent(result.threshold), 2),
+                (
+                    str(result.num_examples)
+                    if result.num_examples is not None
+                    else "--",
+                    2,
+                ),
+                (row_status, 2),
+            ]
+        table_rows.append(_column_set(row))
+
+    image_name = _single_line(image.rsplit("/", 1)[-1] or image, 64)
+    metadata = (
+        f"{_single_line(branch, 64)} @ "
+        f"{_single_line(commit_sha[:8] or 'unknown', 12)} · "
+        f"{image_name} @ {resolved_image}"
+    )
+    if target_ref and target_ref not in {branch, commit_sha}:
+        metadata += f" · ref {_single_line(target_ref, 32)}"
 
     elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": overview}},
-        {"tag": "hr"},
         {
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": "**GSM8K 模型结果**\n" + "\n".join(result_lines),
+                "content": f"**结论**：{conclusion}",
             },
         },
-    ]
-
-    if collected.diagnostics:
-        diagnostic_lines = [
-            f"- {_single_line(message, 220)}" for message in collected.diagnostics[:8]
-        ]
-        if len(collected.diagnostics) > len(diagnostic_lines):
-            diagnostic_lines.append(
-                f"- 其余 {len(collected.diagnostics) - len(diagnostic_lines)} 条请查看 CI 日志"
-            )
-        elements.extend(
-            [
-                {"tag": "hr"},
+        summary,
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**模型精度**"},
+        },
+        *table_rows,
+        {"tag": "hr"},
+        {
+            "tag": "note",
+            "elements": [
                 {
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": "**基础设施诊断**\n" + "\n".join(diagnostic_lines),
-                    },
-                },
-            ]
-        )
-
-    elements.append(
+                    "tag": "plain_text",
+                    "content": _single_line(metadata, 240),
+                }
+            ],
+        },
         {
             "tag": "action",
             "actions": [
@@ -421,15 +505,18 @@ def build_card(
                     "url": run_url,
                 }
             ],
-        }
-    )
+        },
+    ]
     return {
         "config": {"wide_screen_mode": True},
         "header": {
             "template": color,
             "title": {
                 "tag": "plain_text",
-                "content": f"[HCU CI] 高阈值精度 - {status}",
+                "content": (
+                    f"[HCU CI] GSM8K 精度 - "
+                    f"{passed_count}/{len(EXPECTED_MODELS)} 通过"
+                ),
             },
         },
         "elements": elements,

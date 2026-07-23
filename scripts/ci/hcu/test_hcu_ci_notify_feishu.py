@@ -101,6 +101,21 @@ def _write_complete_results(root: Path) -> None:
     _write_partition_status(root / "artifact-1", "accuracy-text-1", "success")
 
 
+def _column_sets(card: dict) -> list:
+    return [
+        element
+        for element in card["elements"]
+        if element.get("tag") == "column_set"
+    ]
+
+
+def _column_texts(column_set: dict) -> list:
+    return [
+        column["elements"][0]["text"]["content"]
+        for column in column_set["columns"]
+    ]
+
+
 class AccuracyResultWriterTest(unittest.TestCase):
     def test_writes_normalized_json_and_rejects_duplicate(self):
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
@@ -168,11 +183,43 @@ class ResultCollectionTest(unittest.TestCase):
                 run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/1",
             )
             self.assertEqual(card["header"]["template"], "green")
-            self.assertIn("全部通过", card["header"]["title"]["content"])
+            self.assertIn(
+                f"{len(notify.EXPECTED_MODELS)}/{len(notify.EXPECTED_MODELS)} 通过",
+                card["header"]["title"]["content"],
+            )
             self.assertNotIn("0713", card["header"]["title"]["content"])
             self.assertIn(
-                f"{len(notify.EXPECTED_MODELS)} 个 GSM8K",
+                f"本次 {len(notify.EXPECTED_MODELS)} 个模型全部达到阈值",
                 card["elements"][0]["text"]["content"],
+            )
+            column_sets = _column_sets(card)
+            self.assertEqual(len(column_sets), len(notify.EXPECTED_MODELS) + 2)
+            self.assertEqual(
+                _column_texts(column_sets[1]),
+                ["**模型**", "**精度**", "**阈值**", "**样本数**", "**结论**"],
+            )
+            self.assertEqual(
+                _column_texts(column_sets[2]),
+                [
+                    notify.EXPECTED_MODELS[0][1],
+                    "95.00%",
+                    "90.00%",
+                    "100",
+                    "<font color='green'>通过</font>",
+                ],
+            )
+            rendered = json.dumps(card, ensure_ascii=False)
+            self.assertNotIn("基础设施诊断", rendered)
+            self.assertNotIn("精度回归", rendered)
+            payload = {
+                "timestamp": "1700000000",
+                "sign": "x" * 44,
+                "msg_type": "interactive",
+                "card": card,
+            }
+            self.assertLess(
+                len(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+                notify.MAX_CARD_BYTES,
             )
 
     def test_empty_artifact_directory_builds_orange_missing_card(self):
@@ -189,6 +236,20 @@ class ResultCollectionTest(unittest.TestCase):
             )
             self.assertEqual(len(collected.missing_models), len(notify.EXPECTED_MODELS))
             self.assertEqual(card["header"]["template"], "orange")
+            self.assertIn(
+                f"{len(notify.EXPECTED_MODELS)} 个模型未完成",
+                card["elements"][0]["text"]["content"],
+            )
+            self.assertEqual(
+                _column_texts(_column_sets(card)[2]),
+                [
+                    notify.EXPECTED_MODELS[0][1],
+                    "--",
+                    "--",
+                    "--",
+                    "<font color='orange'>未完成</font>",
+                ],
+            )
 
     def test_regression_is_red_even_with_missing_results(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -212,6 +273,9 @@ class ResultCollectionTest(unittest.TestCase):
             )
             self.assertEqual(card["header"]["template"], "red")
             self.assertIn(key, collected.regressions)
+            rendered = json.dumps(card, ensure_ascii=False)
+            self.assertIn("未达标", rendered)
+            self.assertNotIn("精度回归", rendered)
 
     def test_duplicate_and_malformed_results_are_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -243,6 +307,10 @@ class ResultCollectionTest(unittest.TestCase):
                 run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/3",
             )
             self.assertEqual(card["header"]["template"], "orange")
+            self.assertIn(
+                "本次结果状态不完整",
+                card["elements"][0]["text"]["content"],
+            )
 
     def test_wrong_run_metadata_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
