@@ -391,6 +391,8 @@ def _glm51_args(quantization: str) -> list[str]:
         "--trust-remote-code",
         "--tp-size",
         "8",
+        "--attention-backend",
+        "nsa",
         "--nsa-prefill-backend",
         "flashmla_auto",
         "--nsa-decode-backend",
