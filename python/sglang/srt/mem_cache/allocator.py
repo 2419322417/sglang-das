@@ -41,10 +41,10 @@ def _get_lightop_alloc_extend_kernel():
 
     _LIGHTOP_ALLOC_EXTEND_KERNEL_CHECKED = True
     try:
-        from lightop import kvcache as lightop_op
+        import lightop
 
         _LIGHTOP_ALLOC_EXTEND_KERNEL = getattr(
-            lightop_op, "dcu_alloc_extend_kernel", None
+            lightop, "hcu_alloc_extend_kernel", None
         )
     except Exception:
         _LIGHTOP_ALLOC_EXTEND_KERNEL = None
