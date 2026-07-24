@@ -43,6 +43,17 @@ EXPECTED_MODELS = (
     ("minimax_m25", "MiniMax-M2.5"),
     ("qwen35_397b_channel_fp8", "Qwen3.5-397B-A17B-Channel-FP8"),
 )
+PREVIEW_METRICS = {
+    "qwen25_7b_instruct": (0.91, 0.88, 100),
+    "qwen3_32b": (0.98, 0.90, 100),
+    "qwen3_30b_a3b": (0.96, 0.93, 100),
+    "qwen36_35b_a3b": (0.97, 0.93, 100),
+    "deepseek_v32_channel_fp8": (0.76, 0.75, 200),
+    "glm51_channel_int8": (0.94, 0.93, 200),
+    "kimi_k26": (0.9363, 0.92, 1319),
+    "minimax_m25": (0.93, 0.93, 200),
+    "qwen35_397b_channel_fp8": (0.98, 0.92, 200),
+}
 EXPECTED_MODEL_KEYS = {key for key, _ in EXPECTED_MODELS}
 EXPECTED_PARTITIONS = {"accuracy-text-0", "accuracy-text-1"}
 MAX_CARD_BYTES = 20 * 1024
@@ -292,6 +303,44 @@ def collect_results(
     return collected
 
 
+def build_preview_results(
+    *,
+    branch: str,
+    target_ref: str,
+    commit_sha: str,
+    image: str,
+    run_id: int,
+    run_attempt: int,
+) -> CollectedResults:
+    collected = CollectedResults()
+    for model_key, display_name in EXPECTED_MODELS:
+        score, threshold, num_examples = PREVIEW_METRICS[model_key]
+        collected.results[model_key] = AccuracyResult(
+            model_key=model_key,
+            model=display_name,
+            score=score,
+            threshold=threshold,
+            num_examples=num_examples,
+            invalid_rate=0.0,
+            latency_seconds=None,
+            source_test="notification-preview",
+        )
+
+    for partition in EXPECTED_PARTITIONS:
+        collected.partition_statuses[partition] = PartitionStatus(
+            partition=partition,
+            outcome="success",
+            run_id=run_id,
+            run_attempt=run_attempt,
+            target_ref=target_ref,
+            commit_sha=commit_sha,
+            image_ref=image,
+            image_id="sha256:notification-preview",
+            runner_name="notification-preview",
+        )
+    return collected
+
+
 def feishu_signature(timestamp: int, secret: str) -> str:
     string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
     digest = hmac.new(string_to_sign, digestmod=hashlib.sha256).digest()
@@ -365,6 +414,7 @@ def build_card(
     image: str,
     workflow_result: str,
     run_url: str,
+    preview: bool = False,
 ) -> dict:
     color, _, _ = _overall_status(collected, workflow_result)
     passed_count = sum(result.passed for result in collected.results.values())
@@ -384,7 +434,9 @@ def build_card(
         else "unknown"
     )
 
-    if regression_count:
+    if preview:
+        conclusion = "通知样式预览，以下为合成数据，不代表实际测试结果。"
+    elif regression_count:
         conclusion_parts = [f"{regression_count} 个模型未达到阈值"]
         if missing_count:
             conclusion_parts.append(f"{missing_count} 个模型未完成")
@@ -419,47 +471,94 @@ def build_card(
         grey=True,
     )
 
-    table_rows = [
-        _column_set(
-            [
-                ("**模型**", 6),
-                ("**精度**", 2),
-                ("**阈值**", 2),
-                ("**样本数**", 2),
-                ("**结论**", 2),
-            ],
-            grey=True,
-        )
-    ]
+    table_rows = []
     for model_key, display_name in EXPECTED_MODELS:
         result = collected.results.get(model_key)
         if result is None:
-            row = [
-                (display_name, 6),
-                ("--", 2),
-                ("--", 2),
-                ("--", 2),
-                ("<font color='orange'>未完成</font>", 2),
-            ]
+            row = {
+                "model": display_name,
+                "score": "--",
+                "threshold": "--",
+                "samples": "--",
+                "status": [{"text": "未完成", "color": "orange"}],
+            }
         else:
             row_status = (
-                "<font color='green'>通过</font>"
+                {"text": "通过", "color": "green"}
                 if result.passed
-                else "<font color='red'>未达标</font>"
+                else {"text": "未达标", "color": "red"}
             )
-            row = [
-                (display_name, 6),
-                (_percent(result.score), 2),
-                (_percent(result.threshold), 2),
-                (
+            row = {
+                "model": display_name,
+                "score": _percent(result.score),
+                "threshold": _percent(result.threshold),
+                "samples": (
                     str(result.num_examples)
                     if result.num_examples is not None
-                    else "--",
-                    2,
+                    else "--"
                 ),
-                (row_status, 2),
-            ]
-        table_rows.append(_column_set(row))
+                "status": [row_status],
+            }
+        table_rows.append(row)
+
+    accuracy_table = {
+        "tag": "table",
+        "element_id": "accuracy_table",
+        "page_size": len(EXPECTED_MODELS),
+        "row_height": "low",
+        "freeze_first_column": True,
+        "header_style": {
+            "text_align": "left",
+            "text_size": "normal",
+            "background_style": "grey",
+            "text_color": "default",
+            "bold": True,
+            "lines": 1,
+        },
+        "columns": [
+            {
+                "name": "model",
+                "display_name": "模型",
+                "data_type": "text",
+                "width": "250px",
+                "horizontal_align": "left",
+                "vertical_align": "center",
+            },
+            {
+                "name": "score",
+                "display_name": "精度",
+                "data_type": "text",
+                "width": "80px",
+                "horizontal_align": "right",
+                "vertical_align": "center",
+            },
+            {
+                "name": "threshold",
+                "display_name": "阈值",
+                "data_type": "text",
+                "width": "80px",
+                "horizontal_align": "right",
+                "vertical_align": "center",
+            },
+            {
+                "name": "samples",
+                "display_name": "样本数",
+                "data_type": "text",
+                "width": "80px",
+                "horizontal_align": "right",
+                "vertical_align": "center",
+            },
+            {
+                "name": "status",
+                "display_name": "结论",
+                "data_type": "options",
+                "width": "80px",
+                "horizontal_align": "center",
+                "vertical_align": "center",
+            },
+        ],
+        "rows": table_rows,
+    }
 
     image_name = _single_line(image.rsplit("/", 1)[-1] or image, 64)
     metadata = (
@@ -484,7 +583,7 @@ def build_card(
             "tag": "div",
             "text": {"tag": "lark_md", "content": "**模型精度**"},
         },
-        *table_rows,
+        accuracy_table,
         {"tag": "hr"},
         {
             "tag": "note",
@@ -507,19 +606,20 @@ def build_card(
             ],
         },
     ]
+    preview_label = "预览 - " if preview else " - "
     return {
-        "config": {"wide_screen_mode": True},
+        "schema": "2.0",
         "header": {
             "template": color,
             "title": {
                 "tag": "plain_text",
                 "content": (
-                    f"[HCU CI] GSM8K 精度 - "
+                    f"[HCU CI] GSM8K 精度{preview_label}"
                     f"{passed_count}/{len(EXPECTED_MODELS)} 通过"
                 ),
             },
         },
-        "elements": elements,
+        "body": {"elements": elements},
     }
 
 
@@ -603,17 +703,32 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--run-id", required=True, type=int)
     parser.add_argument("--run-attempt", required=True, type=int)
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Send a clearly labeled card with synthetic model results",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
-    collected = collect_results(
-        args.results_dir,
-        expected_run_id=args.run_id,
-        expected_run_attempt=args.run_attempt,
-    )
+    if args.preview:
+        collected = build_preview_results(
+            branch=args.branch,
+            target_ref=args.target_ref,
+            commit_sha=args.commit_sha,
+            image=args.image,
+            run_id=args.run_id,
+            run_attempt=args.run_attempt,
+        )
+    else:
+        collected = collect_results(
+            args.results_dir,
+            expected_run_id=args.run_id,
+            expected_run_attempt=args.run_attempt,
+        )
     card = build_card(
         collected,
         branch=args.branch,
@@ -622,6 +737,7 @@ def main() -> int:
         image=args.image,
         workflow_result=args.workflow_result,
         run_url=args.run_url,
+        preview=args.preview,
     )
     if args.dry_run:
         print(json.dumps(card, ensure_ascii=False, indent=2))
@@ -631,7 +747,7 @@ def main() -> int:
     secret = os.environ.get("FEISHU_HCU_CI_SIGNING_SECRET", "")
     send_card(webhook, secret, card)
     print(
-        "Sent one Feishu HCU accuracy card: "
+        f"Sent one Feishu HCU accuracy {'preview ' if args.preview else ''}card: "
         f"passed={sum(result.passed for result in collected.results.values())} "
         f"regressions={len(collected.regressions)} "
         f"missing={len(collected.missing_models)}"

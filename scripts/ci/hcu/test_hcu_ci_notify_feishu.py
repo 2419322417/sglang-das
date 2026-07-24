@@ -104,16 +104,19 @@ def _write_complete_results(root: Path) -> None:
 def _column_sets(card: dict) -> list:
     return [
         element
-        for element in card["elements"]
+        for element in card["body"]["elements"]
         if element.get("tag") == "column_set"
     ]
 
 
-def _column_texts(column_set: dict) -> list:
-    return [
-        column["elements"][0]["text"]["content"]
-        for column in column_set["columns"]
+def _accuracy_table(card: dict) -> dict:
+    tables = [
+        element
+        for element in card["body"]["elements"]
+        if element.get("tag") == "table"
     ]
+    assert len(tables) == 1
+    return tables[0]
 
 
 class AccuracyResultWriterTest(unittest.TestCase):
@@ -183,6 +186,8 @@ class ResultCollectionTest(unittest.TestCase):
                 run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/1",
             )
             self.assertEqual(card["header"]["template"], "green")
+            self.assertEqual(card["schema"], "2.0")
+            self.assertNotIn("elements", card)
             self.assertIn(
                 f"{len(notify.EXPECTED_MODELS)}/{len(notify.EXPECTED_MODELS)} 通过",
                 card["header"]["title"]["content"],
@@ -190,23 +195,31 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertNotIn("0713", card["header"]["title"]["content"])
             self.assertIn(
                 f"本次 {len(notify.EXPECTED_MODELS)} 个模型全部达到阈值",
-                card["elements"][0]["text"]["content"],
+                card["body"]["elements"][0]["text"]["content"],
             )
             column_sets = _column_sets(card)
-            self.assertEqual(len(column_sets), len(notify.EXPECTED_MODELS) + 2)
+            self.assertEqual(len(column_sets), 1)
+            table = _accuracy_table(card)
             self.assertEqual(
-                _column_texts(column_sets[1]),
-                ["**模型**", "**精度**", "**阈值**", "**样本数**", "**结论**"],
+                [column["display_name"] for column in table["columns"]],
+                ["模型", "精度", "阈值", "样本数", "结论"],
             )
             self.assertEqual(
-                _column_texts(column_sets[2]),
-                [
-                    notify.EXPECTED_MODELS[0][1],
-                    "95.00%",
-                    "90.00%",
-                    "100",
-                    "<font color='green'>通过</font>",
-                ],
+                [column["width"] for column in table["columns"]],
+                ["250px", "80px", "80px", "80px", "80px"],
+            )
+            self.assertTrue(table["freeze_first_column"])
+            self.assertEqual(table["page_size"], len(notify.EXPECTED_MODELS))
+            self.assertEqual(len(table["rows"]), len(notify.EXPECTED_MODELS))
+            self.assertEqual(
+                table["rows"][0],
+                {
+                    "model": notify.EXPECTED_MODELS[0][1],
+                    "score": "95.00%",
+                    "threshold": "90.00%",
+                    "samples": "100",
+                    "status": [{"text": "通过", "color": "green"}],
+                },
             )
             rendered = json.dumps(card, ensure_ascii=False)
             self.assertNotIn("基础设施诊断", rendered)
@@ -238,17 +251,17 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertEqual(card["header"]["template"], "orange")
             self.assertIn(
                 f"{len(notify.EXPECTED_MODELS)} 个模型未完成",
-                card["elements"][0]["text"]["content"],
+                card["body"]["elements"][0]["text"]["content"],
             )
             self.assertEqual(
-                _column_texts(_column_sets(card)[2]),
-                [
-                    notify.EXPECTED_MODELS[0][1],
-                    "--",
-                    "--",
-                    "--",
-                    "<font color='orange'>未完成</font>",
-                ],
+                _accuracy_table(card)["rows"][0],
+                {
+                    "model": notify.EXPECTED_MODELS[0][1],
+                    "score": "--",
+                    "threshold": "--",
+                    "samples": "--",
+                    "status": [{"text": "未完成", "color": "orange"}],
+                },
             )
 
     def test_regression_is_red_even_with_missing_results(self):
@@ -309,8 +322,37 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertEqual(card["header"]["template"], "orange")
             self.assertIn(
                 "本次结果状态不完整",
-                card["elements"][0]["text"]["content"],
+                card["body"]["elements"][0]["text"]["content"],
             )
+
+    def test_preview_is_clearly_labeled_and_uses_all_models(self):
+        collected = notify.build_preview_results(
+            branch="v0.5.12_dev",
+            target_ref="a" * 40,
+            commit_sha="a" * 40,
+            image="notification-preview/no-model",
+            run_id=TEST_RUN_ID,
+            run_attempt=TEST_RUN_ATTEMPT,
+        )
+        card = notify.build_card(
+            collected,
+            branch="v0.5.12_dev",
+            target_ref="a" * 40,
+            commit_sha="a" * 40,
+            image="notification-preview/no-model",
+            workflow_result="success",
+            run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/5",
+            preview=True,
+        )
+        self.assertIn("精度预览", card["header"]["title"]["content"])
+        self.assertIn(
+            "合成数据",
+            card["body"]["elements"][0]["text"]["content"],
+        )
+        self.assertEqual(
+            len(_accuracy_table(card)["rows"]),
+            len(notify.EXPECTED_MODELS),
+        )
 
     def test_wrong_run_metadata_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -473,7 +515,7 @@ class FeishuSendTest(unittest.TestCase):
         notify.send_card(
             "https://open.feishu.cn/open-apis/bot/v2/hook/test",
             "test-secret",
-            {"header": {}, "elements": []},
+            {"schema": "2.0", "header": {}, "body": {"elements": []}},
             urlopen_func=opener,
             sleep_func=sleeps.append,
             time_func=lambda: 1700000000,
@@ -492,7 +534,7 @@ class FeishuSendTest(unittest.TestCase):
             notify.send_card(
                 "https://open.feishu.cn/open-apis/bot/v2/hook/test",
                 "test-secret",
-                {"header": {}, "elements": []},
+                {"schema": "2.0", "header": {}, "body": {"elements": []}},
                 urlopen_func=opener,
                 sleep_func=lambda _: None,
                 time_func=lambda: 1700000000,
