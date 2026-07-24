@@ -192,9 +192,26 @@ class ResultCollectionTest(unittest.TestCase):
                 "note",
                 [element.get("tag") for element in card["body"]["elements"]],
             )
+            self.assertNotIn(
+                "action",
+                [element.get("tag") for element in card["body"]["elements"]],
+            )
             metadata = card["body"]["elements"][-2]
             self.assertEqual(metadata["tag"], "div")
             self.assertEqual(metadata["text"]["text_size"], "notation")
+            button = card["body"]["elements"][-1]
+            self.assertEqual(button["tag"], "button")
+            self.assertEqual(
+                button["behaviors"],
+                [
+                    {
+                        "type": "open_url",
+                        "default_url": (
+                            "https://github.com/HYGON-AI/sglang-das/actions/runs/1"
+                        ),
+                    }
+                ],
+            )
             self.assertIn(
                 f"{len(notify.EXPECTED_MODELS)}/{len(notify.EXPECTED_MODELS)} 通过",
                 card["header"]["title"]["content"],

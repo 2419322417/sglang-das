@@ -596,13 +596,14 @@ def build_card(
             },
         },
         {
-            "tag": "action",
-            "actions": [
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看 GitHub Actions"},
+            "type": "primary",
+            "width": "default",
+            "behaviors": [
                 {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "查看 GitHub Actions"},
-                    "type": "primary",
-                    "url": run_url,
+                    "type": "open_url",
+                    "default_url": run_url,
                 }
             ],
         },
