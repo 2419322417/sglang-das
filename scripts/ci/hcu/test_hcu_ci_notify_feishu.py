@@ -188,6 +188,13 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertEqual(card["header"]["template"], "green")
             self.assertEqual(card["schema"], "2.0")
             self.assertNotIn("elements", card)
+            self.assertNotIn(
+                "note",
+                [element.get("tag") for element in card["body"]["elements"]],
+            )
+            metadata = card["body"]["elements"][-2]
+            self.assertEqual(metadata["tag"], "div")
+            self.assertEqual(metadata["text"]["text_size"], "notation")
             self.assertIn(
                 f"{len(notify.EXPECTED_MODELS)}/{len(notify.EXPECTED_MODELS)} 通过",
                 card["header"]["title"]["content"],

@@ -586,13 +586,14 @@ def build_card(
         accuracy_table,
         {"tag": "hr"},
         {
-            "tag": "note",
-            "elements": [
-                {
-                    "tag": "plain_text",
-                    "content": _single_line(metadata, 240),
-                }
-            ],
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": _single_line(metadata, 240),
+                "text_size": "notation",
+                "text_color": "grey",
+                "lines": 2,
+            },
         },
         {
             "tag": "action",
