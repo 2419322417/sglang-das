@@ -16,6 +16,6 @@ concurrency:
 jobs:
   gate:
     name: Checks
-    uses: HYGON-AI/open-source-governance/.github/workflows/pr-quality-gate.yml@35223c7e64541660c9c879bdf188b04c47563272
+    uses: HYGON-AI/open-source-governance/.github/workflows/pr-quality-gate.yml@5c9f1f8651f6ead34784e8088fa74da74c2dd42f
     permissions:
       contents: read
