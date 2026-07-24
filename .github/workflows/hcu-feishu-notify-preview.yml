@@ -13,7 +13,7 @@ concurrency:
 jobs:
   preview:
     name: Send HCU accuracy card preview
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     environment: hcu-ci-notify
     timeout-minutes: 10
     steps:
