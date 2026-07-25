@@ -14,7 +14,7 @@
 
 from typing import Optional
 import numpy as np
-from lightop import moe_gemm_marlin_w16a16, get_moe_cuda_marlin_config_w16a16
+from lightop.moe import moe_gemm_marlin_w16a16, get_moe_cuda_marlin_config_w16a16
 import torch
 import torch.nn.functional as F
 
@@ -29,8 +29,8 @@ if _is_cuda:
     from sglang.jit_kernel.activation import silu_and_mul
     from sglang.jit_kernel.moe_wna16_marlin import moe_wna16_marlin_gemm
 
-from lightop import fuse_silu_and_mul
-from lightop import op as op
+from lightop.activation import fuse_silu_and_mul
+from lightop import moe as op
 from vllm.platforms import current_platform
 device_name = current_platform.get_device_name().replace(" ", "_")
 num_cus= torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count

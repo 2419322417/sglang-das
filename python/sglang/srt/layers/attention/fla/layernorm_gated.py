@@ -272,7 +272,7 @@ def _layer_norm_fwd(
                 ACTIVATION=activation,
             )
         else:
-            from lightop import op
+            from lightop import norm as op
             op.layer_norm_fwd_1pass_opt(
                 x,
                 out,

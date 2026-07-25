@@ -412,7 +412,7 @@ class C4IndexerBackendMixin:
                 )
             else:
                 # from deep_gemm import fp8_paged_mqa_logits as fn
-                from lightop.gemmopt import paged_mqa_logits as fn
+                from lightop.attention import paged_mqa_logits as fn
 
         _c4sl = indexer_metadata.c4_seq_lens
         if _c4sl.dim() == 1:
@@ -479,7 +479,7 @@ class C4IndexerBackendMixin:
                 indexer_metadata.topk_metadata,
             )
         elif envs.SGLANG_LIGHTOP_TOPK.get():
-            from lightop import topk_transform_512 as lightop_topk_transform_512
+            from lightop.attention import topk_transform_512 as lightop_topk_transform_512
 
             lightop_topk_transform_512(
                 logits,

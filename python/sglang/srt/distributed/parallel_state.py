@@ -1050,8 +1050,8 @@ class GroupCoordinator:
         output_tensor = output_tensor.reshape((world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
 
-        if _is_hcu and _use_fused_reshape_to_float:
-            from lightop import op
+        if _is_dcu and _use_fused_reshape_to_float:
+            from lightop import tensor as op
 
             vocab_size = (
                 input_size[:dim]

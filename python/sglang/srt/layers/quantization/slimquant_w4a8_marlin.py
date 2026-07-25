@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 W4A8_TPMOE_BACKEND_ENV = "SGLANG_W4A8_TPMOE_BACKEND"
 W4A8_TPMOE_BACKEND_AUTO = "auto"
-W4A8_TPMOE_BACKEND_LMSLIM = "lmslim"
+W4A8_TPMOE_BACKEND_LIGHTOP = "lightop"
 W4A8_TPMOE_BACKEND_AITER = "aiter"
 _requested_backend = os.getenv(
     W4A8_TPMOE_BACKEND_ENV, W4A8_TPMOE_BACKEND_AUTO
@@ -47,16 +47,16 @@ _requested_backend = os.getenv(
 _lmslim_w4a8_marlin_available = False
 _aiter_w4a8_marlin_available = False
 
-if _requested_backend in {W4A8_TPMOE_BACKEND_AUTO, W4A8_TPMOE_BACKEND_LMSLIM}:
+if _requested_backend in {W4A8_TPMOE_BACKEND_AUTO, W4A8_TPMOE_BACKEND_LIGHTOP}:
     try:
-        from lmslim.layers.fused_moe.fuse_moe_w4a8_marlin import (
+        from lightop.moe import (
             fused_experts_impl_w4a8_marlin,
         )
 
         _lmslim_w4a8_marlin_available = True
     except Exception:
         logger.info(
-            "INFO: Please install lmslim if you want to infer the quantitative model of moe.\n"
+            "INFO: Please install lightop if you want to infer the quantitative model of moe.\n"
         )
 
 if _requested_backend in {W4A8_TPMOE_BACKEND_AUTO, W4A8_TPMOE_BACKEND_AITER}:
@@ -70,26 +70,26 @@ if _requested_backend in {W4A8_TPMOE_BACKEND_AUTO, W4A8_TPMOE_BACKEND_AITER}:
 
 if _requested_backend not in {
     W4A8_TPMOE_BACKEND_AUTO,
-    W4A8_TPMOE_BACKEND_LMSLIM,
+    W4A8_TPMOE_BACKEND_LIGHTOP,
     W4A8_TPMOE_BACKEND_AITER,
 }:
     raise ValueError(
         f"Unsupported {W4A8_TPMOE_BACKEND_ENV}={_requested_backend!r}. "
         f"Supported values: {W4A8_TPMOE_BACKEND_AUTO!r}, "
-        f"{W4A8_TPMOE_BACKEND_LMSLIM!r}, {W4A8_TPMOE_BACKEND_AITER!r}."
+        f"{W4A8_TPMOE_BACKEND_LIGHTOP!r}, {W4A8_TPMOE_BACKEND_AITER!r}."
     )
 
 if _requested_backend == W4A8_TPMOE_BACKEND_AUTO:
     if _lmslim_w4a8_marlin_available:
-        _resolved_backend = W4A8_TPMOE_BACKEND_LMSLIM
+        _resolved_backend = W4A8_TPMOE_BACKEND_LIGHTOP
     elif _aiter_w4a8_marlin_available:
         _resolved_backend = W4A8_TPMOE_BACKEND_AITER
     else:
-        raise RuntimeError("Neither lmslim nor aiter backend is available for w4a8 tpmoe.")
-elif _requested_backend == W4A8_TPMOE_BACKEND_LMSLIM:
+        raise RuntimeError("Neither lightop nor aiter backend is available for w4a8 tpmoe.")
+elif _requested_backend == W4A8_TPMOE_BACKEND_LIGHTOP:
     if not _lmslim_w4a8_marlin_available:
-        raise RuntimeError("lmslim backend is selected for w4a8 tpmoe, but lmslim is not available.")
-    _resolved_backend = W4A8_TPMOE_BACKEND_LMSLIM
+        raise RuntimeError("lightop backend is selected for w4a8 tpmoe, but lightop is not available.")
+    _resolved_backend = W4A8_TPMOE_BACKEND_LIGHTOP
 else:
     if not _aiter_w4a8_marlin_available:
         raise RuntimeError("aiter backend is selected for w4a8 tpmoe, but aiter is not available.")

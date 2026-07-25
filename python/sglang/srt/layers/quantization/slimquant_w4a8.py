@@ -25,10 +25,10 @@ from sglang.srt.layers.parameter import (
     _ColumnvLLMParameter,
     RowvLLMParameter,
 )
-from lmslim.layers.gemm.int8_utils import (
+from lightop.quant import (
     per_token_group_quant_int8,
     per_token_quant_int8)
-from lmslim import quant_tools
+from lightop import gemm_ops as quant_tools
 from sglang.srt.layers.quantization.compressed_tensors import quant_ops
 from sglang.srt.utils import W8a8GetCacheJSON
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig

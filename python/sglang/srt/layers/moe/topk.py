@@ -206,7 +206,7 @@ if _is_musa:
 
     from sglang.srt.hardware_backend.musa.kernels.topk import topk_sigmoid, topk_softmax
 if _use_lightop:
-    from lightop import op as op
+    from lightop import moe as op
 
 _use_lightop_sqrtsoftplus_gate = (
     _use_lightop and _is_hcu and hasattr(op, "moe_fused_gate_sqrtsoftplus")
@@ -763,8 +763,8 @@ def fused_topk(
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
             )
-        elif _is_hcu and _use_fused_topk_softmax:
-            from lightop import op
+        elif _is_dcu and _use_fused_topk_softmax:
+            from lightop import moe as op
 
             op.topk_softmax(
                 topk_weights,

@@ -152,10 +152,19 @@ def act_quant(
     else:
         y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = x.new_empty(*x.size()[:-1], N // block_size, dtype=torch.float32)
-    if _is_hcu:
-        from lightop import op
+    if _is_dcu:
+        from lightop.quant import per_token_group_quant_fp8
+
         use_ue8m0 = scale_fmt is not None
-        op.per_token_group_quant_fp8(y, x, s, block_size, 1e-5, use_ue8m0)
+        per_token_group_quant_fp8(
+            x,
+            block_size,
+            eps=1e-5,
+            dtype=y.dtype,
+            out_q=y,
+            out_scale=s,
+            use_ue8m0=use_ue8m0,
+        )
     else:
         kernel = act_quant_kernel(N, round_scale=scale_fmt is not None)
         kernel(x.view(-1, N), y.view(-1, N), s.view(-1, N // block_size))

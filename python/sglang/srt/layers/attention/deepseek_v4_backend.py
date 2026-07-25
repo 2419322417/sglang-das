@@ -964,8 +964,8 @@ class DeepseekV4AttnBackend(
                 cache_k=swa_k,
             )
         else:
-            if _is_hcu and _use_dpskv4_lightop_quant_k_cache:
-                from lightop import op
+            if _is_dcu and _use_dpskv4_lightop_quant_k_cache:
+                from lightop import kvcache as op
                 if hasattr(op, "quantize_nope_fp8_rope_bf16_pack_store"):
                     self.token_to_kv_pool.set_swa_key_buffer_radix_lightop_fused(
                         layer_id=layer_id,

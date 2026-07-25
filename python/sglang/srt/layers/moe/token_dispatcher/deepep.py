@@ -48,8 +48,7 @@ from sglang.srt.utils import (
     is_npu,
     load_json_config,
 )
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
-from lmslim.layers.gemm.fp8_utils import per_token_quant_fp8
+from lightop.quant import per_token_quant_fp8, per_token_quant_int8
 from sglang.srt.server_args import get_global_server_args
 _is_npu = is_npu()
 

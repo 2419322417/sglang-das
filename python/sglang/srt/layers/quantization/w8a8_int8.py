@@ -38,7 +38,7 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
 # from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod, UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -53,7 +53,7 @@ from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
-from lmslim import quant_ops
+from lightop import gemm_ops as quant_ops
 
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()

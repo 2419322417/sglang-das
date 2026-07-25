@@ -106,8 +106,9 @@ _use_fused_qnorm_rope_kv_rope_quant = get_bool_env_var(
 )
 _use_aiter_tilelang_mhc = get_bool_env_var("SGLANG_ROCM_USE_AITER_TILELANG_MHC")
 
-if _is_hcu:
-    from lightop import op
+if _is_dcu:
+    from lightop import attention as lightop_attention
+    from lightop import norm as lightop_norm
 
     if _use_aiter_tilelang_mhc:
         from aiter.ops.tilelang import mhc_post_fwd, mhc_pre_big_fuse
@@ -395,8 +396,8 @@ class MQALayer(nn.Module):
         # fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
         # return q_out
 
-        if _is_hcu and _use_dpskv4_lightop_rmsnorm:
-            op.rms_norm_no_weight(None, q, None, self.eps)
+        if _is_dcu and _use_dpskv4_lightop_rmsnorm:
+            lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
         else:
             q = rms_normalize_triton(q, self.eps)
         if positions is not None:
@@ -561,7 +562,7 @@ class MQALayer(nn.Module):
             raw_loc = forward_batch.out_cache_loc
             slot_mapping = pool.translate_loc_from_full_to_swa(raw_loc)
 
-            op.fused_deepseek_v4_qnorm_rope_kvnorm_rope_quant_insert_int32(
+            lightop_attention.fused_deepseek_v4_qnorm_rope_kvnorm_rope_quant_insert_int32(
                 q,
                 kv,
                 self.kv_norm.weight,
@@ -576,7 +577,7 @@ class MQALayer(nn.Module):
             if _use_lightop_qnorm_rope:
                 # CP must all-gather/rerange KV before cache insert, so only fuse
                 # the local Q norm/RoPE and local KV norm/RoPE here.
-                op.fused_deepseek_v4_qnorm_rope_kvnorm_rope(
+                lightop_attention.fused_deepseek_v4_qnorm_rope_kvnorm_rope(
                     q,
                     kv,
                     self.kv_norm.weight,
@@ -589,8 +590,8 @@ class MQALayer(nn.Module):
                 if self.use_jit_norm:
                     q = rmsnorm_self(q, self.eps)
                 else:
-                    if _is_hcu and _use_dpskv4_lightop_rmsnorm:
-                        op.rms_norm_no_weight(None, q, None, self.eps)
+                    if _is_dcu and _use_dpskv4_lightop_rmsnorm:
+                        lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
                     else:
                         q = rms_normalize_triton(q, self.eps)
 
