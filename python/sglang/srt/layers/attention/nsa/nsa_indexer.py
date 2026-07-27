@@ -65,8 +65,8 @@ if _use_aiter and not _use_aiter_preshuffle:
         "(needs Triton>=3.5.0 or AITER_ENABLE_AOT_GLUON_PA_MQA_LOGITS=1); "
         "falling back to legacy page_size=1 / KVBlockSize=1 path."
     )
-_is_dcu = is_dcu()
-if _is_dcu:
+_is_hcu = is_hcu()
+if _is_hcu:
     from lightop import attention as lightop_attention
     from lightop import kvcache as lightop_kvcache
     from sglang.srt.layers.attention.nsa.triton_kernel import (

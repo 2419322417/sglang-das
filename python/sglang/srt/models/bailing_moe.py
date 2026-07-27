@@ -102,7 +102,7 @@ _use_fused_bailing_rms_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 _use_fused_bailing_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_RMS_QUANT")
 _use_fused_bailing_moe_sum_add = get_bool_env_var("SGLANG_USE_FUSED_BAILING_MOE_SUM_ADD", "true")
 
-if _is_dcu:
+if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 

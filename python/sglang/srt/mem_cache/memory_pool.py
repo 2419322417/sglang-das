@@ -1883,7 +1883,7 @@ class MLATokenToKVPool(KVCache):
                 fp8_dtype,
             )
         elif self.nsa_kv_cache_store_fp8:
-            if _is_dcu:
+            if _is_hcu:
                 from lightop import kvcache as op
                 op.fused_quantize_and_store_mla_kv_cache(
                     cache_k_nope, 

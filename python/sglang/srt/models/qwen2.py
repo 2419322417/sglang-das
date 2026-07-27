@@ -56,8 +56,8 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, make_layers,is_hcu,get_bool_env_var
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
-_is_dcu = is_dcu()
-if _is_dcu:
+_is_hcu = is_hcu()
+if _is_hcu:
     from lightop.attention import split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant
 _use_fused_rms_rotary=get_bool_env_var("SGLANG_USE_FUSED_SPLIT_QKV_RMS_ROTARY_EMBEDDING")
 

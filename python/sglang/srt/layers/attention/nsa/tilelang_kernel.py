@@ -152,7 +152,7 @@ def act_quant(
     else:
         y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = x.new_empty(*x.size()[:-1], N // block_size, dtype=torch.float32)
-    if _is_dcu:
+    if _is_hcu:
         from lightop.quant import per_token_group_quant_fp8
 
         use_ue8m0 = scale_fmt is not None

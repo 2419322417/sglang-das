@@ -118,7 +118,7 @@ _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 
 from lightop.quant import per_token_quant_int8
 
-if _is_dcu:
+if _is_hcu:
     from lightop.norm import fused_rms_norm_contiguous
 
 if _is_npu:

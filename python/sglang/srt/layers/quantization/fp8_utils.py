@@ -71,7 +71,7 @@ from sglang.srt.utils.custom_op import register_custom_op
 
 from lightop import gemm_ops as quant_ops
 from lightop.gemm_ops import BlockSize
-from lightop.quant import per_token_group_quant_fp8 as per_token_group_quant_fp8_dcu
+from lightop.quant import per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu
 logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()

@@ -763,7 +763,7 @@ def fused_topk(
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
             )
-        elif _is_dcu and _use_fused_topk_softmax:
+        elif _is_hcu and _use_fused_topk_softmax:
             from lightop import moe as op
 
             op.topk_softmax(

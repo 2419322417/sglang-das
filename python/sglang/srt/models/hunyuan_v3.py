@@ -80,7 +80,7 @@ from transformers import PretrainedConfig
 _is_hcu = is_hcu()
 _use_fused_hunyuan_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 
-if _is_dcu:
+if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 

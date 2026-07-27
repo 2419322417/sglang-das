@@ -106,7 +106,7 @@ _use_fused_qnorm_rope_kv_rope_quant = get_bool_env_var(
 )
 _use_aiter_tilelang_mhc = get_bool_env_var("SGLANG_ROCM_USE_AITER_TILELANG_MHC")
 
-if _is_dcu:
+if _is_hcu:
     from lightop import attention as lightop_attention
     from lightop import norm as lightop_norm
 
@@ -396,7 +396,7 @@ class MQALayer(nn.Module):
         # fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
         # return q_out
 
-        if _is_dcu and _use_dpskv4_lightop_rmsnorm:
+        if _is_hcu and _use_dpskv4_lightop_rmsnorm:
             lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
         else:
             q = rms_normalize_triton(q, self.eps)
@@ -590,7 +590,7 @@ class MQALayer(nn.Module):
                 if self.use_jit_norm:
                     q = rmsnorm_self(q, self.eps)
                 else:
-                    if _is_dcu and _use_dpskv4_lightop_rmsnorm:
+                    if _is_hcu and _use_dpskv4_lightop_rmsnorm:
                         lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
                     else:
                         q = rms_normalize_triton(q, self.eps)

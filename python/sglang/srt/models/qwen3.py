@@ -72,7 +72,7 @@ if _is_npu:
 
     from sglang.srt.hardware_backend.npu.cmo import get_cmo_stream, wait_cmo_stream
 
-if _is_dcu:
+if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 class Qwen3Attention(nn.Module):

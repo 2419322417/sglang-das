@@ -105,7 +105,7 @@ if _is_cuda:
         fused_qk_norm_rope,
     )
 
-if _is_dcu:
+if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
 
 TConfig = TypeVar("TConfig", bound=PretrainedConfig)
