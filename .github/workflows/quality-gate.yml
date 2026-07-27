@@ -4,18 +4,18 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches:
-      - v0.5.12_dev
+      - v0.5.15.post1_dev
 
 permissions:
   contents: read
 
 concurrency:
-  group: hygon-pr-gate-${{ github.event.pull_request.number }}
+  group: quality-gate-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   gate:
     name: Checks
-    uses: HYGON-AI/open-source-governance/.github/workflows/pr-quality-gate.yml@341e7ce85fd2e6744a9797b33e27873f4b6baa99
+    uses: HYGON-AI/quality-gate/.github/workflows/pr-quality-gate.yml@67c28b3a58f254db143444511aa9da6852165498
     permissions:
       contents: read
