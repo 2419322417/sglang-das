@@ -781,6 +781,10 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     # the worker copies it here for next iter's draft.
     bonus_tokens: torch.Tensor = None
 
+    # NSA MTP index share: per-request seed captured by draft-extend and reused
+    # by the first draft step.
+    mtp_topk_indices: Optional[torch.Tensor] = None
+
     # shape: (b + 1,)
     kv_indptr: torch.Tensor = None
     kv_indices: torch.Tensor = None

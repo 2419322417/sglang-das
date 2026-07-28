@@ -72,6 +72,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_disagg_prefill_draft_input(
+    batch: ScheduleBatch, result: GenerationBatchResult
+):
+    """Return speculative metadata produced by this exact forward."""
+    next_draft_input = getattr(result, "next_draft_input", None)
+    return next_draft_input if next_draft_input is not None else batch.spec_info
+
+
 def _split_kv_infos(values: List[int]) -> tuple[List[int], List[int]]:
     mid = len(values) // 2
     return list(values[:mid]), list(values[mid:])
@@ -698,6 +706,10 @@ class SchedulerDisaggregationPrefillMixin:
             result.indexer_topk_output.finalize()
             result.indexer_topk_output = None
 
+        # In overlap mode batch is a lightweight snapshot; the producer-owned
+        # next_draft_input preserves the exact row order of this forward.
+        draft_input = _get_disagg_prefill_draft_input(batch, result)
+
         logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         next_token_ids = result.next_token_ids.tolist()
@@ -721,14 +733,21 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
-                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
-                    req.output_topk_p = batch.spec_info.topk_p[i]
-                    req.output_topk_index = batch.spec_info.topk_index[i]
+                if self.spec_algorithm.is_eagle() and draft_input is not None:
+                    req.output_topk_p = draft_input.topk_p[i]
+                    req.output_topk_index = draft_input.topk_index[i]
                     req.hidden_states_tensor = (
-                        batch.spec_info.hidden_states[i].cpu().clone()
+                        draft_input.hidden_states[i].cpu().clone()
+                    )
+                    mtp_indices = getattr(draft_input, "mtp_topk_indices", None)
+                    req.mtp_topk_indices_tensor = (
+                        mtp_indices[i].cpu().clone()
+                        if mtp_indices is not None
+                        else None
                     )
                 else:
                     req.hidden_states_tensor = None
+                    req.mtp_topk_indices_tensor = None
                 if req.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
                     assert extend_input_len_per_req is not None

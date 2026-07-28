@@ -1447,6 +1447,7 @@ class DecodeTransferQueue:
             output_topk_p,
             output_topk_index,
             output_hidden_states,
+            output_mtp_topk_indices,
             output_bootstrap_room,
         ) = self.metadata_buffers.get_buf(idx)
 
@@ -1494,6 +1495,7 @@ class DecodeTransferQueue:
             decode_req.req.output_topk_p = output_topk_p
             decode_req.req.output_topk_index = output_topk_index
             decode_req.req.hidden_states_tensor = output_hidden_states
+            decode_req.req.mtp_topk_indices_tensor = output_mtp_topk_indices
 
         if decode_req.req.return_logprob:
             decode_req.req.output_token_logprobs_val.append(
