@@ -64,6 +64,8 @@ from sglang.srt.configs.model_config import (
     ModelConfig,
     ModelImpl,
     get_num_indexer_layers,
+    is_deepseek_nsa,
+    nsa_layer_skips_topk,
 )
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
@@ -854,6 +856,18 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         ]
         self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
         self.model_config.full_attention_layer_ids = full_attention_layer_ids
+
+    def get_pp_proxy_topk_size(self) -> Optional[int]:
+        """Return the top-k width a non-first PP stage must receive, if any."""
+        hf_config = self.model_config.hf_text_config
+        if (
+            self.pp_size <= 1
+            or self.pp_rank == 0
+            or not is_deepseek_nsa(hf_config)
+            or not nsa_layer_skips_topk(hf_config, self.start_layer)
+        ):
+            return None
+        return getattr(hf_config, "index_topk", None)
 
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(
@@ -2692,6 +2706,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 hidden_size=self.model_config.hidden_size,
                 model_config=self.model_config,
             ),
+            pp_proxy_topk_size=self.get_pp_proxy_topk_size(),
         )
         buffers.num_token_non_padded[...] = num_tokens
 
