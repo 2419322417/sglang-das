@@ -80,8 +80,26 @@ def is_nsa_prefill_cp_round_robin_split():
     )
 
 
+def effective_forward_mode(forward_batch: "ForwardBatch"):
+    """Return the algorithmic mode before DP max-length padding remaps it.
+
+    ``ForwardBatch.prepare_mlp_sync_batch`` can temporarily rewrite decode,
+    target-verify, or draft-extend to ``EXTEND`` so those batches can reuse the
+    padded MLP path. NSA dispatch must continue to use the original mode;
+    otherwise it interprets speculative metadata as prefill metadata.
+    """
+
+    return getattr(
+        forward_batch, "_original_forward_mode", forward_batch.forward_mode
+    )
+
+
+# Legacy alias for internal call sites that predate the public helper.
+_effective_forward_mode = effective_forward_mode
+
+
 def can_nsa_prefill_cp_round_robin_split(forward_batch: "ForwardBatch"):
-    if not forward_batch.forward_mode.is_context_parallel_extend():
+    if not effective_forward_mode(forward_batch).is_context_parallel_extend():
         return False
     cp_size = get_attention_cp_size()
     seq_len = sum(forward_batch.extend_seq_lens_cpu)
@@ -262,7 +280,7 @@ def nsa_use_prefill_cp(forward_batch, nsa_enable_prefill_cp=None):
     if (
         forward_batch.attn_cp_metadata is not None
         and nsa_enable_prefill_cp
-        and forward_batch.forward_mode.is_context_parallel_extend()
+        and effective_forward_mode(forward_batch).is_context_parallel_extend()
     ):
         return True
     else:

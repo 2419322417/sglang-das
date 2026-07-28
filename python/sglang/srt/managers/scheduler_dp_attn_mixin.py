@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 import torch
 
 from sglang.srt.batch_overlap.two_batch_overlap import TboDPAttentionPreparer
+from sglang.srt.configs.model_config import is_mtp_index_share_enabled
 from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -28,6 +29,24 @@ _ENABLE_METRICS_DP_ATTENTION = envs.SGLANG_ENABLE_METRICS_DP_ATTENTION.get()
 logger = logging.getLogger(__name__)
 DP_DECODE_STEP_PROTOCOL_VERSION = 2
 DP_DECODE_STEP_BUILD_ID = 2026071602
+
+
+def _mtp_draft_seed_missing(local_batch: Optional[ScheduleBatch]) -> bool:
+    """Whether this rank's active EAGLE draft lacks a usable top-k seed."""
+    if local_batch is None or local_batch.forward_mode.is_idle():
+        return False
+
+    spec_info = getattr(local_batch, "spec_info", None)
+    is_draft_input = getattr(spec_info, "is_draft_input", None)
+    if not (callable(is_draft_input) and is_draft_input()):
+        return False
+
+    future_indices = getattr(spec_info, "future_indices", None)
+    if future_indices is not None:
+        return getattr(future_indices, "mtp_topk_indices_valid", None) is not True
+
+    seed = getattr(spec_info, "mtp_topk_indices", None)
+    return seed is None or seed.shape[0] != local_batch.batch_size()
 
 
 
@@ -260,6 +279,7 @@ def prepare_mlp_sync_batch_raw(
     require_mlp_tp_gather: bool,
     disable_overlap_schedule: bool,
     offload_tags: set[str],
+    mtp_index_share_for_topk1: bool = False,
     scheduler_step_info: Optional[list[int]] = None,
     sync_group_override: Optional[torch.distributed.ProcessGroup] = None,
 ):
@@ -291,6 +311,14 @@ def prepare_mlp_sync_batch_raw(
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
     ) and not disable_cuda_graph
+    if (
+        not skip_all_gather
+        and mtp_index_share_for_topk1
+        and _mtp_draft_seed_missing(local_batch)
+    ):
+        # Feed the local fallback through the existing DP all-gather so all
+        # ranks make the same graph/eager decision. Skip mode remains local.
+        can_cuda_graph = False
 
     is_extend_in_batch = local_batch.forward_mode.is_extend() if local_batch else False
     if local_batch is not None:
@@ -415,6 +443,11 @@ class SchedulerDPAttnMixin:
             require_mlp_tp_gather=require_mlp_tp_gather(self.server_args),
             disable_overlap_schedule=self.server_args.disable_overlap_schedule,
             offload_tags=self.offload_tags,
+            mtp_index_share_for_topk1=(
+                self.spec_algorithm.is_eagle()
+                and self.server_args.speculative_eagle_topk == 1
+                and is_mtp_index_share_enabled(self.model_config.hf_config)
+            ),
             scheduler_step_info=scheduler_step_info,
             sync_group_override=sync_group_override,
         )

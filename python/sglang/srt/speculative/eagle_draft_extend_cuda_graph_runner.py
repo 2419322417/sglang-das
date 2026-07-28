@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 
+from sglang.srt.configs.model_config import is_mtp_index_share_enabled
 from sglang.srt.layers.dp_attention import DpPaddingMode, set_dp_buffer_len
 from sglang.srt.model_executor.cuda_graph_runner import (
     CUDA_GRAPH_CAPTURE_FAILED_MSG,
@@ -105,6 +106,9 @@ class EAGLEDraftExtendCudaGraphRunner:
             else speculative_num_steps
         )
         self.topk = model_runner.server_args.speculative_eagle_topk
+        self.enable_mtp_index_share = is_mtp_index_share_enabled(
+            model_runner.model_config.hf_config
+        )
         self.draft_extend_attn_backend = (
             draft_extend_attn_backend or eagle_worker.draft_extend_attn_backend
         )
@@ -414,6 +418,8 @@ class EAGLEDraftExtendCudaGraphRunner:
             attn_backend=self.draft_extend_attn_backend,
             padded_static_len=self.padded_static_len,
         )
+        if self.enable_mtp_index_share:
+            forward_batch.capture_mtp_topk_indices = True
 
         self.draft_extend_attn_backend.init_forward_metadata_capture_cuda_graph(
             bs=bs,
@@ -447,6 +453,8 @@ class EAGLEDraftExtendCudaGraphRunner:
             )
             probs = torch.softmax(ret.next_token_logits, dim=-1)
             ret.topk_p, ret.topk_index = fast_topk(probs, self.topk, dim=-1)
+            if self.enable_mtp_index_share:
+                ret.mtp_topk_indices = forward_batch.topk_indices
 
             forward_batch.out_cache_loc = output_cache_loc_backup
             forward_batch.spec_info.hidden_states = hidden_states_backup
@@ -591,4 +599,9 @@ class EAGLEDraftExtendCudaGraphRunner:
             )
             out.topk_p = out_copy.topk_p[:unpadding_bs]
             out.topk_index = out_copy.topk_index[:unpadding_bs]
+            if (
+                self.enable_mtp_index_share
+                and getattr(out_copy, "mtp_topk_indices", None) is not None
+            ):
+                out.mtp_topk_indices = out_copy.mtp_topk_indices[:unpadding_bs]
         return out

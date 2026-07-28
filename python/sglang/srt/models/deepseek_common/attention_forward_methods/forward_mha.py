@@ -145,14 +145,24 @@ class DeepseekMHAForwardMixin:
                     q = self.q_b_proj(q_lora)[0].view(
                         -1, self.num_local_heads, self.qk_head_dim
                     )
-                _ = self.indexer(
+                # The nextn draft-extend pass must emit a seed even on this
+                # dense-MHA fast path. Otherwise batches mixing MHA and sparse
+                # MLA requests can carry fewer seed rows than requests.
+                capture_seed_indices = self.is_nextn and getattr(
+                    forward_batch, "capture_mtp_topk_indices", False
+                )
+                topk_indices = self.indexer(
                     x=hidden_states,
                     q_lora=q_lora,
                     positions=positions,
                     forward_batch=forward_batch,
                     layer_id=self.layer_id,
-                    return_indices=False,
+                    return_indices=capture_seed_indices,
                 )
+                if capture_seed_indices and topk_indices is not None:
+                    # This MHA path returns a tensor directly, rather than the
+                    # decoder tuple handled by DeepseekModelNextN.
+                    forward_batch.topk_indices = topk_indices
             elif _use_aiter_gfx95 and self.q_b_proj.weight.dtype == torch.uint8:
                 # MXFP4: fused RMSNorm + quant
                 q, _, _, _ = fused_rms_mxfp4_quant(

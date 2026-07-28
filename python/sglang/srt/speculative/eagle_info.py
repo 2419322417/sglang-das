@@ -866,6 +866,10 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     def filter_batch(self, new_indices: torch.Tensor, has_been_filtered: bool = True):
         if self.future_indices is not None:
             self.future_indices.indices = self.future_indices.indices[new_indices]
+            if self.future_indices.indices.numel() == 0:
+                # Empty future rows are the identity when merged with an
+                # active batch and therefore do not invalidate its seed.
+                self.future_indices.mtp_topk_indices_valid = True
             return
 
         strict_check = envs.SGLANG_SPEC_ENABLE_STRICT_FILTER_CHECK.get()
@@ -884,6 +888,8 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[: len(new_indices)]
             self.bonus_tokens = self.bonus_tokens[: len(new_indices)]
+            if self.mtp_topk_indices is not None:
+                self.mtp_topk_indices = self.mtp_topk_indices[: len(new_indices)]
         else:
             # in some cases(e.g draft_extend), we have not filtered the batch by `unfinished_index`
             self.topk_p = self.topk_p[new_indices]
@@ -891,14 +897,25 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[new_indices]
             self.bonus_tokens = self.bonus_tokens[new_indices]
+            if self.mtp_topk_indices is not None:
+                self.mtp_topk_indices = self.mtp_topk_indices[new_indices]
 
     def merge_batch(self, spec_info: "EagleDraftInput"):
+        if (self.future_indices is None) != (spec_info.future_indices is None):
+            raise ValueError(
+                "Cannot merge resolved and unresolved Eagle draft inputs; "
+                "their MTP seed rows do not share a common lifecycle"
+            )
         if self.future_indices is not None:
             assert spec_info.future_indices is not None
             self.future_indices = FutureIndices(
                 indices=torch.cat(
                     [self.future_indices.indices, spec_info.future_indices.indices]
-                )
+                ),
+                mtp_topk_indices_valid=(
+                    self.future_indices.mtp_topk_indices_valid is True
+                    and spec_info.future_indices.mtp_topk_indices_valid is True
+                ),
             )
             return
 
@@ -910,6 +927,7 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             self.bonus_tokens = spec_info.bonus_tokens
             self.topk_p = spec_info.topk_p
             self.topk_index = spec_info.topk_index
+            self.mtp_topk_indices = spec_info.mtp_topk_indices
             return
         if len(spec_info.topk_index) == 0:
             return
@@ -922,6 +940,14 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
         )
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
         self.topk_index = torch.cat([self.topk_index, spec_info.topk_index])
+        if self.mtp_topk_indices is None or spec_info.mtp_topk_indices is None:
+            # A partially seeded batch has no request-to-row preserving tensor.
+            # Recompute the first draft step for the entire merged batch.
+            self.mtp_topk_indices = None
+        else:
+            self.mtp_topk_indices = torch.cat(
+                [self.mtp_topk_indices, spec_info.mtp_topk_indices]
+            )
 
 
 @dataclass
