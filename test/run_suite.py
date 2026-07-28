@@ -218,6 +218,7 @@ NIGHTLY_SUITES = {
         "nightly-hcu-quant-opt",
         "nightly-hcu-functional-long",
         "nightly-hcu-api-models",
+        "nightly-hcu-disaggregation-16gpu",
     ],
 }
 

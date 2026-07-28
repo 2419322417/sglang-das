@@ -14,7 +14,7 @@ the convention used by `test/registered/amd/` and `test/registered/ascend/`.
 - `reranker/bw1100/` Reranker OpenAI API smoke tests.
 - `kernels/`         HCU-supported `sgl-kernel` whitelist tests.
 - `perf/`           Reserved for future BW1100 throughput / TTFT / TPOT / ITL benchmarks.
-- `disaggregation/`  Reserved for PD-disaggregation tests that need HCU-specific impls.
+- `disaggregation/bw1100/` Real two-node PD-disaggregation smoke tests.
 
 Broad HCU registrations for existing `test/registered/**` files live in their
 original feature directories.  The `test/registered/hcu/` subtree is only for
@@ -125,3 +125,23 @@ python3 test/run_suite.py --hw hcu --suite stage-b-test-1-hcu-small
 python3 test/run_suite.py --hw hcu --suite nightly-hcu-accuracy --nightly
 python3 test/run_suite.py --hw hcu --suite nightly-hcu-vlm --nightly
 ```
+
+## Two-node PD disaggregation
+
+`nightly-hcu-disaggregation-16gpu` is a real two-host suite. It is not a
+single-host emulation and must be launched through
+`.github/workflows/hcu-pd-1p1d.yml`.
+
+The initial MiniMax-M2.7 configuration uses eight BW1100 HCUs on each host:
+
+```text
+Prefill: TP2 / PP4 / DP1
+Decode:  TP8 / PP1 / DP1
+Router:  runs on the Prefill host
+KV:      Mooncake over one explicitly selected RDMA rail
+RoCE:    GID index 3 (IPv4 RoCE v2 on the selected rail)
+```
+
+The workflow verifies both service identities before sending requests through
+the Router. Direct execution of the registered test requires the P, D, and
+Router services to be running already.
