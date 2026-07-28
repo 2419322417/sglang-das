@@ -40,6 +40,15 @@ if _is_cuda:
 from sglang.srt.utils import W8a8GetCacheJSON
 W8A8_TRITONJSON=W8a8GetCacheJSON()
 
+
+def _use_kme_hipblaslt(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    device_props = torch.cuda.get_device_properties(device)
+    gcn_arch = getattr(device_props, "gcnArchName", "").split(":")[0]
+    return gcn_arch == "gfx928"
+
+
 class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
 
     def __init__(
@@ -113,6 +122,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
     def process_weights_after_loading(self, layer) -> None:
         n=layer.weight.shape[0]
         k=layer.weight.shape[1]
+        use_kme_hipblaslt = (
+            self.w8a8_strategy == 3
+            and _use_kme_hipblaslt(layer.weight.device)
+        )
 
         if self.w8a8_strategy==1:
             if [n,k] not in W8A8_TRITONJSON.weight_shapes:
@@ -127,9 +140,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                         m=int(key.split('_')[0])
                         ops.triton_int8_gemm_helper(m=m,n=n,k=k,per_token_act_quant=True,per_out_channel_weight_quant=True,use_bias=False,device=layer.weight.device,best_config=value)
         elif self.w8a8_strategy==3:
-            # KME/gfx928 hipBLASLt swapped TN: pack W as col-major [K,N]
-            # stride (1,K). Do not apply the later CHANNEL .t() that would
-            # turn it into contiguous [N,K] for the legacy blaslt path.
             w = layer.weight.data  # [N, K]
             if self.strategy == QuantizationStrategy.TENSOR:
                 max_w_scale, w = requantize_with_max_scale(
@@ -146,11 +156,16 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
             else:
                 raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
-            w_col = torch.empty_strided(
-                (k, n), (1, k), device=w.device, dtype=w.dtype
-            )
-            w_col.copy_(w.t().contiguous())
-            layer.weight = Parameter(w_col, requires_grad=False)
+            if use_kme_hipblaslt:
+                # gfx928 KME swapped TN: col-major [K,N], stride (1,K).
+                packed_weight = torch.empty_strided(
+                    (k, n), (1, k), device=w.device, dtype=w.dtype
+                )
+                packed_weight.copy_(w.t().contiguous())
+            else:
+                # gfx936/gfx938 use legacy NT with contiguous [N,K].
+                packed_weight = w.contiguous()
+            layer.weight = Parameter(packed_weight, requires_grad=False)
 
             W8A8_TRITONJSON.gen_model_json()
 
@@ -177,8 +192,15 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                 layer.input_zero_point = None
 
             if not self.input_symmetric:
-                # W is [K,N] col-major; AZP adj is sum over K -> [1,N]
-                azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+                # AZP adjustment is the reduction over K, normalized to [1,N].
+                if use_kme_hipblaslt:
+                    azp_adj = layer.weight.sum(
+                        dim=0, keepdim=True, dtype=torch.int32
+                    )
+                else:
+                    azp_adj = layer.weight.sum(
+                        dim=1, keepdim=False, dtype=torch.int32
+                    ).unsqueeze(0)
                 if self.is_static_input_scheme:
                     azp_adj = layer.input_zero_point * azp_adj
                 layer.azp_adj = Parameter(azp_adj, requires_grad=False)
