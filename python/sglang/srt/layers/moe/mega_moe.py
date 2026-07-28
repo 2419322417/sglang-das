@@ -160,11 +160,9 @@ def _get_hcu_w8a8_pre_dispatch_quant():
         return _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT
 
     try:
-        from lightop import op as lightop_op
+        from lightop.quant import per_token_quant_fp8
 
-        _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT = getattr(
-            lightop_op, "per_token_quant_fp8", None
-        )
+        _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT = per_token_quant_fp8
     except Exception as exc:
         logger.warning(
             "lightop per-token FP8 quantization is unavailable; falling back "
@@ -190,7 +188,12 @@ def _prepare_standalone_megamoe_inputs(
             if hidden_states.is_contiguous()
             else hidden_states.contiguous()
         )
-        quant(buf.x[:num_tokens], quant_input, buf.x_sf[:num_tokens])
+        quant(
+            quant_input,
+            dtype=buf.x.dtype,
+            out_q=buf.x[:num_tokens],
+            out_scale=buf.x_sf[:num_tokens],
+        )
     else:
         import megamoe
 

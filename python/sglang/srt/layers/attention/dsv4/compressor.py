@@ -45,7 +45,7 @@ from sglang.srt.utils import get_bool_env_var, is_hcu
 _is_hcu = is_hcu()
 _use_dpskv4_lightop_quant_k_cache = get_bool_env_var("SGLANG_USE_DPSKV4_LIGHTOP_QUANT_K_CACHE")
 if _is_hcu:
-    from lightop import op
+    from lightop import kvcache as op
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.deepseek_v4_backend import DeepseekV4AttnBackend

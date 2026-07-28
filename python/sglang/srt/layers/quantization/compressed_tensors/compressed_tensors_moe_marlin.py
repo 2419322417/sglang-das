@@ -18,9 +18,9 @@ from sglang.srt.utils import set_weight_attrs, direct_register_custom_op
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 try:
-    from lmslim.layers.fused_moe.fuse_moe_int8_marlin import fused_experts_impl_int8_marlin
+    from lightop.moe import fused_experts_impl_int8_marlin
 except Exception:
-    print("INFO: Please install lmslim if you want to infer the quantitative model of moe.\n")
+    print("INFO: Please install lightop if you want to infer the quantitative model of moe.\n")
 
 logger = logging.getLogger(__name__)
 

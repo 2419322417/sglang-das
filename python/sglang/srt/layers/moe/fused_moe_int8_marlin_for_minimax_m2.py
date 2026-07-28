@@ -21,16 +21,17 @@ from vllm import _custom_ops as ops
 import torch
 import triton
 import triton.language as tl
-import lmslim.envs as lsenvs
+from lightop import envs as lsenvs
 
 use_lightop = lsenvs.LMSLIM_USE_LIGHTOP
 device_name = lsenvs.LMSLIM_GPU_NAME
 num_cus = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 if use_lightop:
-    from lightop import moe_gemm_marlin_w8a8, get_moe_cuda_marlin_config, fuse_silu_mul_quant
-    from lightop import op as op
+    from lightop.activation import fuse_silu_mul_quant
+    from lightop.moe import get_moe_cuda_marlin_config, moe_gemm_marlin_w8a8
+    from lightop import moe as op
 
-from lmslim.layers.gemm.int8_utils import (
+from lightop.quant import (
    per_token_group_quant_int8, per_token_quant_int8)
 
 import importlib.util as _iu, os as _os, sys as _sys, vllm
@@ -514,7 +515,7 @@ def fused_experts_impl_int8_marlin_minimax_m2(
             config2)
 
         if use_lightop and shared_output is not None:
-            lightop.moe_sum(input=intermediate_cache3.view(*intermediate_cache3.shape),
+            op.moe_sum(input=intermediate_cache3.view(*intermediate_cache3.shape),
                        output=out_hidden_states[begin_chunk_idx:end_chunk_idx],
                        bias=shared_output[begin_chunk_idx:end_chunk_idx],
                        expert_mask=None,

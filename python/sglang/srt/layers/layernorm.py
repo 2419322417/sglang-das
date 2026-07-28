@@ -90,8 +90,8 @@ elif _is_hip:
         # Fallback: vllm not available, will use forward_native
         _has_vllm_rms_norm = False
 if _is_hcu:
-    from lightop import op 
-    from lightop import gemma_fused_add_rmsnorm as gemma_fused_add_rmsnorm_hcu
+    from lightop import norm as op
+    from lightop.norm import gemma_fused_add_rmsnorm as gemma_fused_add_rmsnorm_hcu
 
 if _is_cuda:
     # HF-semantics RMSNorm kernel (JIT-compiled).  Used when `cast_x_before_out_mul=True`

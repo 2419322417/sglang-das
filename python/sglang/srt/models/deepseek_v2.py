@@ -225,7 +225,7 @@ _use_fused_rmsnorm_rope = get_bool_env_var("SGLANG_USE_FUSED_RMSNORM_ROPE")
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _rms_quant_path = get_int_env_var('SGLANG_USE_RMS_QUANT_PATH')
 if _use_fused_rmsnorm_rope:
-    from lightop import fused_rms_norm_rope_contiguous
+    from lightop.attention import fused_rms_norm_rope_contiguous
     fused_rms_norm_rope_contiguous = torch._dynamo.disable(fused_rms_norm_rope_contiguous)
     # 此处注册自定义算子反而导致多了很多triton kernel影响性能
     # def fused_rms_norm_rope_wrapper(

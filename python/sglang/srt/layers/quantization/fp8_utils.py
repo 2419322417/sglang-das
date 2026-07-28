@@ -29,12 +29,6 @@ from sglang.srt.utils.common import torch_release
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
-from lmslim import quant_ops
-from lmslim.layers.gemm.fp8_utils import (
-    per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu,
-)
-from lmslim.quantize.quant_ops import BlockSize
-
 from sglang.srt.layers.quantization.fp8_kernel import (
     fp8_dtype,
     fp8_max,
@@ -69,6 +63,9 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.custom_op import register_custom_op
 
+from lightop import gemm_ops as quant_ops
+from lightop.gemm_ops import BlockSize
+from lightop.quant import per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu
 logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()

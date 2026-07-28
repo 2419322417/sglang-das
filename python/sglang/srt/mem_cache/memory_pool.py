@@ -1884,7 +1884,7 @@ class MLATokenToKVPool(KVCache):
             )
         elif self.nsa_kv_cache_store_fp8:
             if _is_hcu:
-                from lightop import op
+                from lightop import kvcache as op
                 op.fused_quantize_and_store_mla_kv_cache(
                     cache_k_nope, 
                     cache_k_rope, 
@@ -1905,7 +1905,7 @@ class MLATokenToKVPool(KVCache):
                 )
         else:
             if _is_hcu:
-                from lightop import op
+                from lightop import kvcache as op
                 if self.dtype == torch.float8_e5m2:
                     fp8_dtype_str = "fp8_e5m2"
                 else:
