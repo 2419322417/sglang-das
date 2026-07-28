@@ -569,7 +569,9 @@ class EagleDraftWorker(BaseDraftWorker):
         # Run forward
         forward_batch = ForwardBatch.init_new(batch, self.draft_runner)
         forward_batch.return_logprob = False
-        forward_batch.return_hidden_states_before_norm = self.need_hidden_states_before_norm
+        forward_batch.return_hidden_states_before_norm = (
+            self.need_hidden_states_before_norm
+        )
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
         logits_output = self.draft_runner.forward(forward_batch).logits_output
@@ -613,7 +615,9 @@ class EagleDraftWorker(BaseDraftWorker):
             torch.get_device_module(self.device).current_stream().wait_stream(
                 self.plan_stream
             )
-        forward_batch.return_hidden_states_before_norm = self.need_hidden_states_before_norm
+        forward_batch.return_hidden_states_before_norm = (
+            self.need_hidden_states_before_norm
+        )
         if forward_batch.spec_info.num_correct_drafts is None:
             # `batch_result.accept_lens` already includes the bonus token, so use it
             # directly for `num_accept_tokens` and subtract 1 for `num_correct_drafts`.
@@ -703,7 +707,8 @@ class EAGLEWorkerV2(BaseSpecWorker):
         # Detect mHC (multi-hidden-context) models that need pre-normalization hidden states
         # for their NextN draft layers (e.g., DeepSeek-V4-Flash with hc_mult > 1).
         self.need_hidden_states_before_norm = (
-            getattr(target_worker.model_runner.model_config, "hc_hidden_size", None) is not None
+            getattr(target_worker.model_runner.model_config, "hc_hidden_size", None)
+            is not None
         )
         self._draft_worker = EagleDraftWorker(
             server_args,
@@ -779,11 +784,13 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 else CaptureHiddenMode.FULL
             )
             model_worker_batch.capture_hidden_mode = target_capture_mode
-            model_worker_batch.return_hidden_states_before_norm = self.need_hidden_states_before_norm
+            model_worker_batch.return_hidden_states_before_norm = (
+                self.need_hidden_states_before_norm
+            )
             batch_output = self.target_worker.forward_batch_generation(
                 model_worker_batch
             )
-            
+
             # Draft prefill
             draft_capture_mode = (
                 CaptureHiddenMode.NULL
