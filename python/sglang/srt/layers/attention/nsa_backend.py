@@ -538,7 +538,10 @@ class NativeSparseAttnBackend(
                 self.speculative_num_draft_tokens,
             )
             page_table = torch.repeat_interleave(
-                page_table, repeats=self.speculative_num_draft_tokens, dim=0
+                page_table,
+                repeats=self.speculative_num_draft_tokens,
+                dim=0,
+                output_size=batch_size * self.speculative_num_draft_tokens,
             )
         elif forward_batch.forward_mode.is_draft_extend(include_v2=True):
             assert (
@@ -570,14 +573,20 @@ class NativeSparseAttnBackend(
                 # tokens upfront. All requests extend by the same fixed
                 # (speculative_num_draft_tokens). Use scalar to avoid GPU sync.
                 page_table = torch.repeat_interleave(
-                    page_table, repeats=self.speculative_num_draft_tokens, dim=0
+                    page_table,
+                    repeats=self.speculative_num_draft_tokens,
+                    dim=0,
+                    output_size=batch_size * self.speculative_num_draft_tokens,
                 )
             else:
                 # DRAFT_EXTEND (v1): V1 worker extends by (num_correct_drafts + 1) per request
                 # after verification. Lengths vary per request based on how many tokens
                 # were accepted.
                 page_table = torch.repeat_interleave(
-                    page_table, repeats=forward_batch.extend_seq_lens, dim=0
+                    page_table,
+                    repeats=forward_batch.extend_seq_lens,
+                    dim=0,
+                    output_size=sum(extend_seq_lens_cpu),
                 )
         elif forward_batch.forward_mode.is_extend():
             assert (
@@ -1115,13 +1124,33 @@ class NativeSparseAttnBackend(
                 torch.cumsum(cache_seqlens, dim=0, dtype=torch.int32)
             )
 
-            extend_seq_lens = spec_info.num_accept_tokens[:bs]
-            extend_seq_lens_cpu = extend_seq_lens.tolist()
-
             page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
-            page_indices = torch.repeat_interleave(
-                page_indices, repeats=extend_seq_lens, dim=0
-            )
+
+            if forward_mode.is_draft_extend_v2():
+                # The V2 graph always executes a fixed N rows per request.
+                # num_accept_tokens only describes which rows are committed;
+                # using it here would leave an uninitialized suffix in the
+                # fixed bs * N attention metadata buffer.
+                extend_seq_lens = spec_info.extend_seq_lens_tensor[:bs].to(
+                    torch.int32
+                )
+                extend_num_tokens = bs * self.speculative_num_draft_tokens
+                page_indices = torch.repeat_interleave(
+                    page_indices,
+                    repeats=self.speculative_num_draft_tokens,
+                    dim=0,
+                    output_size=extend_num_tokens,
+                )
+            else:
+                extend_seq_lens = spec_info.num_accept_tokens[:bs]
+                extend_seq_lens_cpu = extend_seq_lens.tolist()
+                extend_num_tokens = sum(extend_seq_lens_cpu)
+                page_indices = torch.repeat_interleave(
+                    page_indices,
+                    repeats=extend_seq_lens,
+                    dim=0,
+                    output_size=extend_num_tokens,
+                )
             metadata.page_table_1[: page_indices.shape[0], :max_seqlen_k].copy_(
                 page_indices
             )
@@ -1129,7 +1158,7 @@ class NativeSparseAttnBackend(
             seqlens_expanded = seqlens_expand_triton(
                 extend_seq_lens,
                 cache_seqlens,
-                sum(extend_seq_lens_cpu),
+                extend_num_tokens,
                 self.speculative_num_draft_tokens,
             )
             metadata.nsa_seqlens_expanded[: seqlens_expanded.shape[0]].copy_(
@@ -2643,21 +2672,45 @@ class NativeSparseAttnMultiStepBackend:
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_cuda_graph_state(max_bs, max_num_tokens)
 
-    def init_forward_metadata_capture_cuda_graph(self, forward_batch: ForwardBatch):
+    def get_cuda_graph_seq_len_fill_value(self):
+        if not self.attn_backends:
+            return 1
+        return self.attn_backends[0].get_cuda_graph_seq_len_fill_value()
+
+    def init_forward_metadata_capture_cuda_graph(self, *args, **kwargs):
+        if args and isinstance(args[0], ForwardBatch):
+            forward_batch = args[0]
+            for i in range(self.speculative_num_steps - 1):
+                self.attn_backends[i].init_forward_metadata_capture_cuda_graph(
+                    forward_batch.batch_size,
+                    forward_batch.batch_size * self.topk,
+                    forward_batch.req_pool_indices,
+                    forward_batch.seq_lens,
+                    encoder_lens=None,
+                    forward_mode=ForwardMode.DECODE,
+                    spec_info=forward_batch.spec_info,
+                )
+            return
+
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_forward_metadata_capture_cuda_graph(
-                forward_batch.batch_size,
-                forward_batch.batch_size * self.topk,
-                forward_batch.req_pool_indices,
-                forward_batch.seq_lens,
-                encoder_lens=None,
-                forward_mode=ForwardMode.DECODE,
-                spec_info=forward_batch.spec_info,
+                *args,
+                **kwargs,
             )
 
-    def init_forward_metadata_replay_cuda_graph(
-        self, forward_batch: ForwardBatch, bs: int
-    ):
+    def init_forward_metadata_replay_cuda_graph(self, *args, **kwargs):
+        if args and isinstance(args[0], ForwardBatch):
+            forward_batch = args[0]
+            bs = args[1] if len(args) > 1 else kwargs["bs"]
+            return self._init_decode_replay_cuda_graph(forward_batch, bs)
+
+        for i in range(self.speculative_num_steps - 1):
+            self.attn_backends[i].init_forward_metadata_replay_cuda_graph(
+                *args,
+                **kwargs,
+            )
+
+    def _init_decode_replay_cuda_graph(self, forward_batch: ForwardBatch, bs: int):
         if envs.SGLANG_NSA_ENABLE_MTP_PRECOMPUTE_METADATA.get():
             # Precompute metadata once (shared across all backends)
             precomputed = self.attn_backends[0]._precompute_replay_metadata(

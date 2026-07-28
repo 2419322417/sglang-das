@@ -1008,6 +1008,18 @@ class EagleDraftExtendInput(SpecInput):
         (e.g., STANDALONE)."""
         if worker.speculative_algorithm.is_standalone():
             return None
+
+        draft_runner = _draft_runner_of(worker)
+        draft_inner_model = getattr(draft_runner.model, "model", None)
+        if draft_inner_model is not None and hasattr(draft_inner_model, "hnorm"):
+            # NextN/MTP draft models feed spec_info.hidden_states through their
+            # own hnorm. The static graph buffer must therefore use the draft
+            # model width (times hc_mult for architectures that concatenate
+            # multiple hidden states), not the target spec hidden width.
+            draft_hidden_size = draft_runner.model_config.hidden_size
+            hc_mult = getattr(draft_inner_model, "hc_mult", 1)
+            return draft_hidden_size * hc_mult
+
         target_cfg = worker.target_worker.model_runner.model_config
         if not (
             worker.speculative_algorithm.is_eagle3()
