@@ -16,10 +16,13 @@ from sglang.srt.layers.moe.utils import (
 )
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 from sglang.srt.utils import direct_register_custom_op, set_weight_attrs
+
 try:
     from lightop.moe import fused_experts_impl_int8_marlin
 except Exception:
-    print("INFO: Please install lightop if you want to infer the quantitative model of moe.\n")
+    print(
+        "INFO: Please install lightop if you want to infer the quantitative model of moe.\n"
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +340,6 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
     #             "EPLB not supported for "
     #             "`CompressedTensorsW8A8Int8MoEMethod` yet.")
 
-
     #     topk_weights, topk_ids = FusedMoE.select_experts(
     #         hidden_states=x,
     #         router_logits=router_logits,
@@ -372,7 +374,7 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
     #         use_nn_moe=False,
     #         shared_output=shared_output,
     #         routed_scaling_factor=routed_scaling_factor)
-    
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -420,7 +422,7 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
         )
 
         return StandardCombineInput(hidden_states=output)
-    
+
     def apply_with_shared_output(
         self,
         layer: torch.nn.Module,
