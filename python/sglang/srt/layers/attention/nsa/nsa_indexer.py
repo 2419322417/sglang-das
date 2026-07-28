@@ -836,12 +836,8 @@ class Indexer(MultiPlatformOp):
                         weights[:q_offset].to(torch.float32),
                         ks,
                         ke,
-                        q[:q_offset].shape[0],
-                        kv_bf16.shape[0],
-                        q.shape[1],
-                        q.shape[2],
-                        None,
-                        True,
+                        kv_scale=None,
+                        clean_logit=True,
                     )
                 elif _is_hip and not _is_hcu:
                     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
@@ -858,12 +854,8 @@ class Indexer(MultiPlatformOp):
                         weights[:q_offset],
                         ks,
                         ke,
-                        q[:q_offset].shape[0],
-                        kv.shape[0],
-                        q.shape[1],
-                        q.shape[2],
-                        scale.view(torch.float32).flatten(),
-                        True
+                        kv_scale=scale.view(torch.float32).flatten(),
+                        clean_logit=True,
                     )
                 else:
                     logits = deep_gemm.fp8_mqa_logits(
@@ -913,12 +905,8 @@ class Indexer(MultiPlatformOp):
                         weights[start:end].to(torch.float32),
                         ks[start:end],
                         ke[start:end],
-                        q[start:end].shape[0],
-                        kv_bf16.shape[0],
-                        q.shape[1],
-                        q.shape[2],
-                        None,
-                        True,
+                        kv_scale=None,
+                        clean_logit=True,
                     )
                 elif _is_hip and not _is_hcu:
                     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
@@ -1125,12 +1113,8 @@ class Indexer(MultiPlatformOp):
                         weights.to(torch.float32),
                         ks,
                         ke,
-                        q.shape[0],
-                        kv_bf16.shape[0],
-                        q.shape[1],
-                        q.shape[2],
-                        None,
-                        True,
+                        kv_scale=None,
+                        clean_logit=True,
                     )
                 else:
                     k_fp8 = torch.cat(k_fp8_list, dim=0).view(torch.float8_e4m3fn)
@@ -1182,12 +1166,8 @@ class Indexer(MultiPlatformOp):
                         weights.to(torch.float32),
                         ks,
                         ke,
-                        q.shape[0],
-                        k_fp8.shape[0],
-                        q.shape[1],
-                        q.shape[2],
-                        None,
-                        True,
+                        kv_scale=None,
+                        clean_logit=True,
                     )
                 elif _is_hcu:
                     k_scale = forward_batch.token_to_kv_pool.get_index_k_scale_continuous(
