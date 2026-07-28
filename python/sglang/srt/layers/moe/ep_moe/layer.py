@@ -89,7 +89,6 @@ from deepgemm import m_grouped_w4a8_gemm_nt_masked, m_grouped_i8_gemm_nt_masked,
     m_grouped_i8_gemm_nt_contiguous, \
     m_grouped_fp8_gemm_nt_masked, m_grouped_bf16_gemm_nt_masked, m_grouped_fp8_gemm_nt_contiguous, \
     m_grouped_bf16_gemm_nt_contiguous
-from lightop.gemm_ops import m_grouped_w8a8_gemm_nt_contig_asm as m_grouped_i8_gemm_nt_contiguous
 from lightop.activation import fuse_silu_mul_quant_ep, fuse_silu_mul_quant, fuse_silu_mul_fp8_quant_ep, fuse_silu_and_mul, \
     fuse_silu_mul_fp8_quant
 from lightop import moe as lightop_op
