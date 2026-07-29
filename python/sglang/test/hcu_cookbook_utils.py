@@ -34,9 +34,23 @@ from sglang.test.hcu_utils import (
     openai_base_url,
 )
 from sglang.test.run_eval import run_eval
+from sglang.test.test_utils import popen_launch_server
 from sglang.utils import read_jsonl
 
 HCU_COOKBOOK_API_KEY = "sk-123456"
+DEFAULT_HCU_GSM8K_DATA_PATH = (
+    "/public/opendas/DL_DATA/opencompass_data/gsm8k/test.jsonl"
+)
+DEFAULT_HCU_MMLU_DATASET_PATH = "/public/opendas/DL_DATA/llm-models/datasets/mmlu"
+
+
+def _require_local_data_path(path: str, dataset_name: str) -> str:
+    if not Path(path).exists():
+        raise AssertionError(
+            f"Local {dataset_name} data path does not exist: {path}. "
+            "Mount the HCU dataset directory or set the corresponding data path env."
+        )
+    return path
 
 QWEN3_COOKBOOK_ENV = {
     "SGLANG_ENABLE_SPEC_V2": "1",
@@ -188,15 +202,6 @@ KIMI_K26_COOKBOOK_ENV = {
     "NCCL_MAX_NCHANNELS": "16",
     "NCCL_MIN_NCHANNELS": "16",
     "ALLREDUCE_STREAM_WITH_COMPUTE": "1",
-}
-
-MIMO_V2_FLASH_COOKBOOK_ENV = {
-    "SGLANG_USE_LIGHTOP": "1",
-    "SGLANG_KV_LAYOUT_HCU_FA": "0",
-    "SGLANG_ENABLE_SPEC_V2": "1",
-    "SGLANG_USE_AITER_FP8_ASM_MOE": "1",
-    "SGLANG_USE_TRITON_EXTEND_FROM_AITER": "1",
-    "SGLANG_USE_MODELSCOPE": "1",
 }
 
 VLM_COOKBOOK_ENV = {
@@ -742,17 +747,6 @@ KIMI_K26_8GPU = HcuCookbookModelConfig(
     dtype_or_quant="w4a16",
     env=KIMI_K26_COOKBOOK_ENV,
     server_args=_kimi_k26_args(),
-)
-
-MIMO_V2_FLASH_8GPU = HcuCookbookModelConfig(
-    name="MiMo-V2-Flash",
-    env_name="SGLANG_HCU_MIMO_V2_FLASH_MODEL",
-    default_path="/public/opendas/DL_DATA/llm-models/Xiaomi/MiMo-V2-Flash",
-    tp_size=8,
-    timeout=7200,
-    dtype_or_quant="fp8",
-    env=MIMO_V2_FLASH_COOKBOOK_ENV,
-    server_args=_mimo_v2_flash_args(),
 )
 
 QWEN3_VL_4B_INSTRUCT = HcuCookbookModelConfig(

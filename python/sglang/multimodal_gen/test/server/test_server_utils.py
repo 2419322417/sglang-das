@@ -549,24 +549,16 @@ class PerformanceValidator:
                 expected, hip_tolerance, min_abs_tolerance_ms
             )
             if actual > upper_bound:
-                if is_hcu():
-                    logger.warning(
-                        f"[HCU PERF WARNING] Validation would fail for '{name}'.\n"
-                        f"  Actual:   {actual:.4f}ms\n"
-                        f"  Expected: {expected:.4f}ms\n"
-                        f"  HCU Limit: {upper_bound:.4f}ms "
-                        f"(rel_tol: {amd_tolerance:.1%}, abs_pad: {min_abs_tolerance_ms}ms)\n"
-                        f"  Original tolerance was: {tolerance:.1%}"
-                    )
-                else:
-                    logger.warning(
-                        f"[AMD PERF WARNING] Validation would fail for '{name}'.\n"
-                        f"  Actual:   {actual:.4f}ms\n"
-                        f"  Expected: {expected:.4f}ms\n"
-                        f"  AMD Limit: {upper_bound:.4f}ms "
-                        f"(rel_tol: {amd_tolerance:.1%}, abs_pad: {min_abs_tolerance_ms}ms)\n"
-                        f"  Original tolerance was: {tolerance:.1%}"
-                    )
+                logger.warning(
+                    f"[{hardware_platform} PERF WARNING] Validation would fail for "
+                    f"'{name}'.\n"
+                    f"  Actual:   {actual:.4f}ms\n"
+                    f"  Expected: {expected:.4f}ms\n"
+                    f"  {hardware_platform} Limit: {upper_bound:.4f}ms "
+                    f"(rel_tol: {hip_tolerance:.1%}, "
+                    f"abs_pad: {min_abs_tolerance_ms}ms)\n"
+                    f"  Original tolerance was: {tolerance:.1%}"
+                )
         else:
             upper_bound = calculate_upper_bound(
                 expected, tolerance, min_abs_tolerance_ms
@@ -985,7 +977,7 @@ def get_generate_fn(
                 )
                 return (video_id, b"")
 
-            if is_amd:
+            if is_hip_platform:
                 if is_hcu():
                     logger.warning(
                         f"[HCU TIMEOUT WARNING] {case_id}: video job {video_id} did not complete "

@@ -552,11 +552,12 @@ class Qwen3MoeAttention(nn.Module):
         self.alt_stream = alt_stream
         self.page_size = 64
         self.layer_id = layer_id
-        if get_global_server_args().kv_cache_dtype == "fp8_e4m3":
+        kv_cache_dtype = get_server_args().kv_cache_dtype
+        if kv_cache_dtype == "fp8_e4m3":
             self.kv_cache_dtype = torch.float8_e4m3fn
-        elif get_global_server_args().kv_cache_dtype == "fp8_e5m2":
+        elif kv_cache_dtype == "fp8_e5m2":
             self.kv_cache_dtype = torch.float8_e5m2
-        elif get_global_server_args().kv_cache_dtype in ("bf16", "bfloat16"):
+        elif kv_cache_dtype in ("bf16", "bfloat16"):
             self.kv_cache_dtype = torch.bfloat16
 
     def op_prepare(self, state):

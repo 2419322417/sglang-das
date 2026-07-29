@@ -2,12 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import enum
-from enum import Enum
-from typing import Callable, List, Optional
-import torch
-
-from compressed_tensors.quantization import QuantizationStrategy
 import logging
 from typing import List, Optional
 
@@ -22,10 +16,6 @@ from sglang.srt.layers.moe.utils import (
 )
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 from sglang.srt.utils import direct_register_custom_op, set_weight_attrs
-
-from sglang.srt.utils import set_weight_attrs, direct_register_custom_op
-from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
-from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 
 try:
     from lmslim.layers.fused_moe.fuse_moe_int8_marlin import (
@@ -357,11 +347,9 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
             del w13_packed
             torch.cuda.empty_cache()
 
-            w2_marlin_list = []
-            for ii in range(layer.w2_weight.shape[0]):
-                w2_marlin_list.append(w8a8_nt_kpack2_marlin_weight(layer.w2_weight[ii]))
-            w2_lightop = torch.stack(w2_marlin_list, dim=0)
-            layer.w2_weight = Parameter(w2_lightop, requires_grad=False)
+            w2_weight = layer.w2_weight.contiguous()
+            w2_packed = pack_fn(w2_weight, shuffle_unique=shuffle_unique)
+            layer.w2_weight = Parameter(w2_packed, requires_grad=False)
             layer.register_buffer(
                 "w2_weight_deepgemm", layer.w2_weight.data, persistent=False
             )

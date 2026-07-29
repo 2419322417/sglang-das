@@ -195,9 +195,7 @@ def _get_hcu_w8a8_pre_dispatch_quant():
     try:
         from lightop.quant import per_token_quant_fp8
 
-        _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT = getattr(
-            lightop_op, "per_token_quant_fp8", None
-        )
+        _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT = per_token_quant_fp8
     except Exception as exc:
         logger.warning(
             "lightop per-token FP8 quantization is unavailable; falling back "

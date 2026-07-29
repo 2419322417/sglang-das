@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 from sglang.kernels.ops.quantization.fp8_kernel import (
     fp8_dtype,
     fp8_max,
+    fp8_min,
     is_fp8_fnuz,
     mxfp8_block_scaled_matmul_triton,
     pack_mxfp8_scales_triton,

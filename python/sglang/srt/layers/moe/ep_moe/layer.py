@@ -20,12 +20,6 @@ from sglang.srt.distributed import (
     get_moe_expert_parallel_rank,
     get_moe_expert_parallel_world_size,
 )
-from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_marlin import (
-    SlimQuantCompressedTensorsMarlinConfig,
-)
-from sglang.srt.layers.quantization.slimquant_w4a8_marlin import (
-    SlimQuantW4A8Int8MarlinConfig,
-)
 import torch
 import torch.nn.functional as F
 
@@ -105,21 +99,13 @@ if TYPE_CHECKING:
     )
 
 from deepgemm import (
-    m_grouped_w4a8_gemm_nt_masked,
-    m_grouped_w8a8_gemm_nt_masked,
-    m_grouped_i8_gemm_nt_contiguous as _deepgemm_i8_gemm_nt_contiguous,
+    m_grouped_bf16_gemm_nt_contiguous,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_contiguous,
-    m_grouped_bf16_gemm_nt_contiguous,
+    m_grouped_i8_gemm_nt_contiguous,
+    m_grouped_i8_gemm_nt_masked,
+    m_grouped_w4a8_gemm_nt_masked,
 )
-from lightop import (
-    fuse_silu_mul_quant,
-    fuse_silu_mul_quant_ep,
-    fuse_silu_mul_fp8_quant_ep,
-    fuse_silu_and_mul,
-    fuse_silu_mul_fp8_quant,
-)
-from lightop import op as lightop_op
 from deepgemm.m_group_gemm import grouped_gemm_w4a16_nt_masked_entry
 from lightop import moe as lightop_op
 from lightop.activation import (
@@ -134,12 +120,6 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 _is_hcu = is_hcu()
 _is_fp8_fnuz = is_fp8_fnuz()
-if _is_hcu:
-    from lightop import (
-        m_grouped_w8a8_gemm_nt_contig_asm as m_grouped_i8_gemm_nt_contiguous,
-    )
-else:
-    m_grouped_i8_gemm_nt_contiguous = _deepgemm_i8_gemm_nt_contiguous
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
 _use_marlin_w16a16_moe = get_bool_env_var("SGLANG_USE_MARLIN_W16A16_MOE")
@@ -383,7 +363,7 @@ def m_grouped_w4a8_gemm_nt_masked_fake(
     return d
 
 
-def m_grouped_w8a8_gemm_nt_masked_wrapper(
+def m_grouped_i8_gemm_nt_masked_wrapper(
     a0: torch.Tensor,
     a1: torch.Tensor,
     b0: torch.Tensor,
@@ -399,13 +379,11 @@ def m_grouped_w8a8_gemm_nt_masked_wrapper(
         d,
         masked_m,
         expected_m_per_group,
-        config={
-            "MODE": 1000,
-        },
+        shuffle_unique=shuffle_unique,
     )
 
 
-def m_grouped_w8a8_gemm_nt_masked_fake(
+def m_grouped_i8_gemm_nt_masked_fake(
     a0: torch.Tensor,
     a1: torch.Tensor,
     b0: torch.Tensor,
@@ -453,7 +431,7 @@ direct_register_custom_op(
     op_name="m_grouped_i8_gemm_nt_masked",
     op_func=m_grouped_i8_gemm_nt_masked_wrapper,
     mutates_args=[],
-    fake_impl=m_grouped_w8a8_gemm_nt_masked_fake,
+    fake_impl=m_grouped_i8_gemm_nt_masked_fake,
 )
 
 direct_register_custom_op(
@@ -1663,7 +1641,7 @@ class DeepEPMoE(FusedMoE):
         )
 
         # ---- first GEMM ----
-        torch.ops.sglang.m_grouped_w8a8_gemm_nt_masked(
+        torch.ops.sglang.m_grouped_i8_gemm_nt_masked(
             hidden_states,
             hidden_states_scale,
             w13_weight,
@@ -1686,7 +1664,7 @@ class DeepEPMoE(FusedMoE):
             (num_groups, m, n2), device=q_a2_all.device, dtype=torch.bfloat16
         )
 
-        torch.ops.sglang.m_grouped_w8a8_gemm_nt_masked(
+        torch.ops.sglang.m_grouped_i8_gemm_nt_masked(
             q_a2_all,
             q_a2_scale,
             w2_weight,

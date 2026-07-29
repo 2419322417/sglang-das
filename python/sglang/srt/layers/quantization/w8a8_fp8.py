@@ -45,6 +45,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     input_to_float8,
     normalize_e4m3fn_to_e4m3fnuz,
 )
+from sglang.srt.runtime_context import get_server_args
 from sglang.srt.utils import get_bool_env_var, is_hcu, set_weight_attrs
 
 if TYPE_CHECKING:
@@ -56,6 +57,14 @@ if TYPE_CHECKING:
 _is_fp8_fnuz = is_fp8_fnuz()
 _is_hcu = is_hcu()
 _use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
+
+
+def _is_moe_prefill_or_normal() -> bool:
+    server_args = get_server_args()
+    return (
+        server_args.disaggregation_mode == "prefill"
+        or server_args.deepep_mode == "normal"
+    )
 
 try:
     from lightop.moe import (  # noqa: F401
@@ -355,7 +364,7 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
                 def _pack_per_expert_deepep(weight: torch.Tensor) -> torch.Tensor:
                     num_experts = weight.shape[0]
                     for i in range(num_experts):
-                        if is_moe_prefill():  # noqa: F821
+                        if _is_moe_prefill_or_normal():
                             new_expert = weight8bit_nt_kpack2_marlin(
                                 weight[i]
                             ).contiguous()

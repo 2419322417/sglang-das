@@ -796,6 +796,17 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             bootstrap_room_ids_int=bootstrap_room_ids_int,
         )
 
+        # The target-verify graph freezes the hidden-output width at capture time.
+        # mHC target models must therefore capture pre-hc-head hidden states here;
+        # setting this flag only on a replay batch is too late.
+        if (
+            self.capture_forward_mode.is_target_verify()
+            and not self.model_runner.is_draft_worker
+            and getattr(self.model_runner.model_config, "hc_hidden_size", None)
+            is not None
+        ):
+            forward_batch.return_hidden_states_before_norm = True
+
         # Trip the coordinator so the hisparse code path is captured into the
         # graph; backends read it from self.model_runner.hisparse_coordinator.
         forward_batch.hisparse_coordinator = self.model_runner.hisparse_coordinator

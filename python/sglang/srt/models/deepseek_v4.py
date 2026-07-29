@@ -2409,7 +2409,19 @@ class DeepseekV4Model(nn.Module):
             forward_batch, "return_hidden_states_before_norm", False
         )
         # CP all-gather only on the last PP rank; PP IPC carries CP-split tensors.
-        if self.pp_group.is_last_rank and dsa_use_prefill_cp(forward_batch):
+        if dsa_use_prefill_cp(forward_batch):
+            pre_hc_head = None
+            if need_pre_hc_head:
+                pre_hc_head = cp_all_gather_rerange_output(
+                    hidden_states.flatten(1),
+                    self.cp_size,
+                    forward_batch,
+                    torch.cuda.current_stream(),
+                )
+            hidden_states = self.hc_head(
+                hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base
+            )
+            hidden_states = self.norm(hidden_states)
             hidden_states = cp_all_gather_rerange_output(
                 hidden_states,
                 self.cp_size,

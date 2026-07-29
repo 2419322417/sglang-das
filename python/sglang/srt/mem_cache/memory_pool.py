@@ -2996,10 +2996,11 @@ class MLATokenToKVPool(KVCache):
                 op.fused_concat_and_store_mla_kv_cache(
                     cache_k_nope,
                     cache_k_rope,
-                    self.kv_buffer[layer_id - self.start_layer],
+                    dst_buffer,
                     loc,
                     fp8_dtype_str,
                 )
+                return
             else:
                 if cache_k_nope.dtype != self.dtype:
                     cache_k_nope = cache_k_nope.to(self.dtype)
@@ -3008,12 +3009,12 @@ class MLATokenToKVPool(KVCache):
                     cache_k_nope = cache_k_nope.view(self.store_dtype)
                     cache_k_rope = cache_k_rope.view(self.store_dtype)
 
-            set_mla_kv_buffer_triton(
-                dst_buffer,
-                loc,
-                cache_k_nope,
-                cache_k_rope,
-            )
+                set_mla_kv_buffer_triton(
+                    dst_buffer,
+                    loc,
+                    cache_k_nope,
+                    cache_k_rope,
+                )
 
     def set_mla_kv_buffer(
         self,
