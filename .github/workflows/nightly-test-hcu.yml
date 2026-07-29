@@ -183,7 +183,7 @@ jobs:
       wheel_urls: ${{ steps.probe.outputs.wheel_urls }}
     env:
       CHECKOUT_REF: ${{ needs.validate-config.outputs.target_ref }}
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
     steps:
       - name: Checkout code
@@ -223,7 +223,7 @@ jobs:
           import pathlib
           import sys
 
-          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/home/github/sgl_whl_temp"))
+          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/ci_public/sglang-das/hcu-wheel-staging"))
           container_root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_CONTAINER_ROOT", "/hcu-wheel-staging"))
           target_sha = os.environ["HCU_WHEEL_TARGET_SHA"]
           repo = os.environ["GITHUB_REPOSITORY"]
@@ -299,7 +299,7 @@ jobs:
         --cap-add=SYS_PTRACE
         --security-opt seccomp=unconfined
         --privileged=true
-        -v /home/github/sgl_whl_temp:/home/github/sgl_whl_temp
+        -v /ci_public/sglang-das/hcu-wheel-staging:/ci_public/sglang-das/hcu-wheel-staging
     env:
       TORCH_VERSION: '2.10.0'
       PIP_INDEX_URL: http://10.16.1.201:9929/nightly/dtk2604/+simple/
@@ -308,7 +308,7 @@ jobs:
       HCU_RUNNER_HOST_UID: ${{ vars.HCU_RUNNER_HOST_UID || '1000' }}
       HCU_RUNNER_HOST_GID: ${{ vars.HCU_RUNNER_HOST_GID || '1000' }}
       WHEEL_COMMIT_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
     steps:
       - name: Normalize workspace ownership before checkout
         run: |
@@ -394,7 +394,7 @@ jobs:
           ls -lh output/
 
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          STAGING_ROOT="${HCU_WHEEL_STAGING_ROOT:-/home/github/sgl_whl_temp}"
+          STAGING_ROOT="${HCU_WHEEL_STAGING_ROOT:-/ci_public/sglang-das/hcu-wheel-staging}"
           STAGING_DIR="${STAGING_ROOT}/${GITHUB_REPOSITORY_OWNER}_${REPO_NAME}/pr-nightly-${GITHUB_RUN_ID}/${WHEEL_COMMIT_SHA}"
           WHEEL_DIR="${STAGING_DIR}/wheels"
 
@@ -443,7 +443,7 @@ jobs:
     outputs:
       wheel_urls: ${{ steps.wait.outputs.wheel_urls }}
     env:
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       HCU_WHEEL_TARGET_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
       HCU_WHEEL_TARGET_SHORT_SHA: ${{ needs.probe-hcu-wheels.outputs.short_sha }}
@@ -468,7 +468,7 @@ jobs:
           import sys
           import time
 
-          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/home/github/sgl_whl_temp"))
+          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/ci_public/sglang-das/hcu-wheel-staging"))
           container_root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_CONTAINER_ROOT", "/hcu-wheel-staging"))
           target_sha = os.environ["HCU_WHEEL_TARGET_SHA"]
           short_sha = os.environ.get("HCU_WHEEL_TARGET_SHORT_SHA", target_sha[:12])
@@ -820,7 +820,7 @@ jobs:
       SGLANG_HCU_MMLU_DATASET_PATH: /public/opendas/DL_DATA/llm-models/datasets/mmlu
       HCU_CI_INSTALL_WHEEL_URLS: ${{ needs.wait-hcu-wheels.outputs.wheel_urls || '' }}
       HCU_CI_USE_INSTALLED_WHEELS: "1"
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       HCU_ACCURACY_SHARED_ROOT: /ci_public/sglang-das/hcu-accuracy
     steps:
