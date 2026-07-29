@@ -1930,9 +1930,15 @@ class ServerArgs:
                             assert (
                                 self.dp_size == 1
                             ), "For round-robin split mode, dp attention is not supported."
-                        assert (
-                            self.tp_size <= 8
-                        ), "Context parallel only supports single machine (tp_size <= 8). Cross-machine CP has precision issues."
+                        # HCU nodes expose 16 GPUs on one machine. Keep the
+                        # upstream eight-GPU limit for other platforms, where
+                        # a larger TP group would span machines.
+                        max_single_node_tp_size = 16 if is_hcu() else 8
+                        assert self.tp_size <= max_single_node_tp_size, (
+                            "Context parallel only supports a single machine "
+                            f"(tp_size <= {max_single_node_tp_size}). "
+                            "Cross-machine CP has precision issues."
+                        )
                         self.attn_cp_size = self.tp_size // self.dp_size
 
                         logger.warning(
