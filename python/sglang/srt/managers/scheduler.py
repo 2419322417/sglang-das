@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1145,12 +1148,6 @@ class Scheduler(
                 raise RuntimeError(
                     "PD Decode DP sync currently supports attn_tp_size=1 and "
                     "attn_cp_size=1 only"
-                )
-            if not self.server_args.enable_dp_attention_local_control_broadcast:
-                raise RuntimeError(
-                    "PD Decode DP sync requires "
-                    "--enable-dp-attention-local-control-broadcast "
-                    "to keep recv control off the full tp_cpu_group"
                 )
 
             tp_ranks = list(self.tp_group.ranks)

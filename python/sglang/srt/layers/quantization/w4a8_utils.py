@@ -16,7 +16,7 @@ import torch
 import numpy as np
 
 try:
-    from lightop import awq_marlin_repack_w4a8
+    from lightop.gemm_ops import awq_marlin_repack_w4a8
     use_lightop = False
 except Exception:
     use_lightop = False

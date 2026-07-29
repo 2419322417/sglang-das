@@ -51,7 +51,7 @@ from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
-from lmslim import quant_ops
+from lightop import gemm_ops as quant_ops
 
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()

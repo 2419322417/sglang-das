@@ -17,7 +17,7 @@ from vllm import _custom_ops as ops
 import torch
 import triton
 import triton.language as tl
-import lmslim.envs as lsenvs
+from lightop import envs as lsenvs
 
 use_lightop = lsenvs.LMSLIM_USE_LIGHTOP
 device_name = lsenvs.LMSLIM_GPU_NAME

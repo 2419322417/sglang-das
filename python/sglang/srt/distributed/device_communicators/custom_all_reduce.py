@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/device_communicators/custom_all_reduce.py
@@ -419,7 +422,7 @@ def dispatch_custom_allreduce(
             )
         else:
             logger.info(
-                "[AR] Using AiterCustomAllreduce (ROCm/HIP, transport=%s, "
+                "[AR] Using AiterCustomAllreduce (AMD, transport=%s, "
                 "enable_register_for_capturing=%s)",
                 transport,
                 enable_reg,

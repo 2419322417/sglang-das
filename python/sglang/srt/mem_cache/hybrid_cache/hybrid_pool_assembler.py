@@ -550,12 +550,17 @@ def build_hybrid_mamba_stack(
         server_args=server_args,
         use_mla=use_mla,
     )
+    # MambaPoolHost only supports page_first/page_first_direct/layer_first.
+    # layout_hcu is KV-only (MHATokenToKVPoolHostHCU); fall back for mamba state.
+    mamba_layout = server_args.hicache_mem_layout
+    if mamba_layout == "layout_hcu":
+        mamba_layout = "page_first"
     mamba_host_pool = MambaPoolHost(
         mamba_pool,
         server_args.hicache_ratio,
         server_args.hicache_size,
         allocator_type=server_args.hicache_storage_backend,
-        layout=server_args.hicache_mem_layout,
+        layout=mamba_layout,
     )
     entries = [
         build_pool_entry(

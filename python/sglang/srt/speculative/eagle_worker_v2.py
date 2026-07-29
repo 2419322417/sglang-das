@@ -159,7 +159,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         self.target_worker = target_worker
         self.attn_cp_rank = attn_cp_rank
         self.moe_dp_rank = moe_dp_rank
-
+        # Detect mHC (multi-hidden-context) models that need pre-normalization
+        # hidden states for their NextN draft layers (e.g., DeepSeek-V4-Flash
+        # with hc_mult > 1). Mirrors the same detection in EAGLEWorkerV2.
+        self.need_hidden_states_before_norm = (
+            getattr(target_worker.model_runner.model_config, "hc_hidden_size", None)
+            is not None
+        )
         # Args for easy access
         self.device = server_args.device
         self.topk = server_args.speculative_eagle_topk
@@ -832,6 +838,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         batch.capture_hidden_mode = capture_hidden_mode
         forward_batch = ForwardBatch.init_new(batch, self.draft_runner)
         forward_batch.return_logprob = False
+        forward_batch.return_hidden_states_before_norm = (
+            self.need_hidden_states_before_norm
+        )
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
 

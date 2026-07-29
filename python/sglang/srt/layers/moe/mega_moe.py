@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -190,7 +193,7 @@ def _get_hcu_w8a8_pre_dispatch_quant():
         return _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT
 
     try:
-        from lightop import op as lightop_op
+        from lightop.quant import per_token_quant_fp8
 
         _MEGA_MOE_HCU_W8A8_PRE_DISPATCH_QUANT = getattr(
             lightop_op, "per_token_quant_fp8", None
@@ -220,7 +223,12 @@ def _prepare_standalone_megamoe_inputs(
             if hidden_states.is_contiguous()
             else hidden_states.contiguous()
         )
-        quant(buf.x[:num_tokens], quant_input, buf.x_sf[:num_tokens])
+        quant(
+            quant_input,
+            dtype=buf.x.dtype,
+            out_q=buf.x[:num_tokens],
+            out_scale=buf.x_sf[:num_tokens],
+        )
     else:
         import megamoe
 

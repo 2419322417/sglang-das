@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/layernorm_gated.py
 # Copyright (c) 2024, Tri Dao.
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
@@ -295,7 +299,7 @@ def _layer_norm_fwd(
                 **pdl_kwargs,
             )
         else:
-            from lightop import op
+            from lightop import norm as op
             op.layer_norm_fwd_1pass_opt(
                 x,
                 out,

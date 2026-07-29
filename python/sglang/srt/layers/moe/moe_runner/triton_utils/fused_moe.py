@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/a6221a144af772fd1a68fe7e627935dc53e81738/vllm/model_executor/layers/fused_moe/fused_moe.py
@@ -13,7 +16,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from lightop import get_moe_cuda_marlin_config, moe_gemm_marlin_w8a8_fp8
+from lightop.moe import get_moe_cuda_marlin_config, moe_gemm_marlin_w8a8_fp8
 
 from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
     act_and_mul_triton,
@@ -1570,7 +1573,7 @@ def fused_moe_fp8_w8a8(
             topk,
             cuda_config1,
         )
-        from lightop import fuse_silu_mul_fp8_quant
+        from lightop.activation import fuse_silu_mul_fp8_quant
 
         fp8_cache2, fp8_cache2_scale = fuse_silu_mul_fp8_quant(
             intermediate_cache1, fp8type=0
@@ -1593,7 +1596,7 @@ def fused_moe_fp8_w8a8(
 
         if routed_scaling_factor is None:
             routed_scaling_factor = 1.0
-        from lightop import op as ops  # 报错缺少ops
+        from lightop import moe as ops  # 报错缺少ops
 
         ops.moe_sum(
             intermediate_cache3,

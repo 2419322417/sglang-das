@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Adapted from https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/quantization/compressed_tensors
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -29,7 +32,6 @@ _use_fused_silu_mul_quant = get_bool_env_var("SGLANG_USE_FUSED_SILU_MUL_QUANT")
 
 __all__ = ["CompressedTensorsW8A8Int8", "NPUCompressedTensorsW8A8Int8"]
 
-from lmslim import quant_ops 
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
 if _is_hcu:
@@ -128,7 +130,64 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                         m=int(key.split('_')[0])
                         ops.triton_int8_gemm_helper(m=m,n=n,k=k,per_token_act_quant=True,per_out_channel_weight_quant=True,use_bias=False,device=layer.weight.device,best_config=value)
         elif self.w8a8_strategy==3:
-            layer.weight.data = layer.weight.data.T
+            # KME/gfx928 hipBLASLt swapped TN: pack W as col-major [K,N]
+            # stride (1,K). Do not apply the later CHANNEL .t() that would
+            # turn it into contiguous [N,K] for the legacy blaslt path.
+            w = layer.weight.data  # [N, K]
+            if self.strategy == QuantizationStrategy.TENSOR:
+                max_w_scale, w = requantize_with_max_scale(
+                    weight=w,
+                    weight_scale=layer.weight_scale,
+                    logical_widths=layer.logical_widths,
+                )
+                layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+                n, k = w.shape[0], w.shape[1]
+            elif self.strategy == QuantizationStrategy.CHANNEL:
+                layer.weight_scale = Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
+            else:
+                raise ValueError(f"Unknown quantization strategy {self.strategy}")
+
+            w_col = torch.empty_strided(
+                (k, n), (1, k), device=w.device, dtype=w.dtype
+            )
+            w_col.copy_(w.t().contiguous())
+            layer.weight = Parameter(w_col, requires_grad=False)
+
+            W8A8_TRITONJSON.gen_model_json()
+
+            if self.is_static_input_scheme and hasattr(layer, "input_scale"):
+                if self.input_symmetric:
+                    layer.input_scale = Parameter(
+                        layer.input_scale.max(), requires_grad=False
+                    )
+                else:
+                    input_scale = layer.input_scale
+                    input_zero_point = layer.input_zero_point
+                    int8_traits = torch.iinfo(torch.int8)
+                    azps = input_zero_point.to(dtype=torch.int32)
+                    range_max = (input_scale * (int8_traits.max - azps)).max()
+                    range_min = (input_scale * (int8_traits.min - azps)).min()
+                    scale = (range_max - range_min) / (
+                        int8_traits.max - int8_traits.min
+                    )
+                    azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
+                    layer.input_scale = Parameter(scale, requires_grad=False)
+                    layer.input_zero_point = Parameter(azp, requires_grad=False)
+            else:
+                layer.input_scale = None
+                layer.input_zero_point = None
+
+            if not self.input_symmetric:
+                # W is [K,N] col-major; AZP adj is sum over K -> [1,N]
+                azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+                if self.is_static_input_scheme:
+                    azp_adj = layer.input_zero_point * azp_adj
+                layer.azp_adj = Parameter(azp_adj, requires_grad=False)
+            else:
+                layer.azp_adj = None
+            return
         else:
             weight_data=layer.weight.data
             _weight=weight_data.T.contiguous().reshape(n,-1)
@@ -272,7 +331,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                                     scale_a=x_scale,
                                     scale_b=layer.weight_scale,
                                     out_dtype=x.dtype,
-                                    bias=None)
+                                    bias=bias)
         else:
             return ops.rocblas_scaled_mm(x_q,
                                         layer.weight,

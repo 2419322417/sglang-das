@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/model_executor/layers/linear.py"""
@@ -58,17 +61,17 @@ _use_fused_dpskv4_silu_mul_fp8_quant = get_bool_env_var("SGLANG_USE_FUSED_DPSKV4
 
 if _use_fused_rms_quant:
     try:
-        from lmslim.quantize.quant_ops import lm_faster_rmsquant
+        from lightop.norm import lm_faster_rmsquant
     except Exception as e:
         print(f"Error: Import fused rmsquant error: {e}")
 if _use_fused_silu_mul_quant:
     try:
-        from lmslim.quantize.quant_ops import lm_fuse_silu_mul_quant
+        from lightop.activation import lm_fuse_silu_mul_quant
     except Exception as e:
         print(f"Error: Import fused silu_mul_quant error: {e}")
 
 if _use_fused_bailing_silu_mul_fp8_quant or _use_fused_dpskv4_silu_mul_fp8_quant:
-    from lightop import fuse_silu_mul_fp8_quant
+    from lightop.activation import fuse_silu_mul_fp8_quant
 
 if _use_fused_bailing_silu_mul_fp8_quant or _use_fused_dpskv4_silu_mul_fp8_quant:
     import deepgemm

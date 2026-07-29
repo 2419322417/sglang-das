@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 Server management and performance validation for diffusion tests.
 """
@@ -533,16 +537,16 @@ class PerformanceValidator:
         Uses the larger of relative tolerance or absolute tolerance to prevent
         flaky failures on very fast operations.
 
-        For AMD GPUs, uses 100% higher tolerance and issues warning instead of assertion.
+        For HIP platforms, uses 100% higher tolerance and issues a warning
+        instead of an assertion.
         """
-        # Check if running on AMD GPU
-        is_amd = current_platform.is_hip()
+        is_hip_platform = current_platform.is_hip()
 
-        if is_amd:
-            # Use 100% higher tolerance for AMD (2x the expected value)
-            amd_tolerance = 1.0  # 100%
+        if is_hip_platform:
+            hardware_platform = "HCU" if is_hcu() else "AMD"
+            hip_tolerance = 1.0  # 100%
             upper_bound = calculate_upper_bound(
-                expected, amd_tolerance, min_abs_tolerance_ms
+                expected, hip_tolerance, min_abs_tolerance_ms
             )
             if actual > upper_bound:
                 if is_hcu():
@@ -938,12 +942,11 @@ def get_generate_fn(
 
         job_completed = False
         is_baseline_generation_mode = os.environ.get("SGLANG_GEN_BASELINE", "0") == "1"
-        # Check if running on AMD GPU - use longer timeout
-        is_amd = current_platform.is_hip()
+        is_hip_platform = current_platform.is_hip()
         if is_baseline_generation_mode:
             timeout = 3600.0
-        elif is_amd:
-            timeout = 2400.0  # 40 minutes for AMD
+        elif is_hip_platform:
+            timeout = 2400.0
         else:
             timeout = 1200.0
         deadline = time.time() + timeout

@@ -303,6 +303,24 @@ def _freqs_cis_to_cos_sin(
     _FREQS_CIS_TO_COS_SIN[key] = (cos, sin)
     return cos, sin
 
+_fused_qnorm_rope_cos_sin_cache: dict[tuple, torch.Tensor] = {}
+
+
+def _get_fused_qnorm_rope_cos_sin_cache(freqs_cis: torch.Tensor) -> torch.Tensor:
+    key = (
+        freqs_cis.device.type,
+        freqs_cis.device.index,
+        freqs_cis.data_ptr(),
+    )
+    cache = _fused_qnorm_rope_cos_sin_cache.get(key)
+    if cache is None:
+        freqs_real = torch.view_as_real(freqs_cis)  # [max_pos, 32, 2]
+        cache = torch.cat(
+            [freqs_real[..., 0], freqs_real[..., 1]], dim=-1
+        ).contiguous()  # [max_pos, 64], first 32 cos, last 32 sin
+        _fused_qnorm_rope_cos_sin_cache[key] = cache
+    return cache
+
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.deepseek_v4_backend import (
@@ -2384,7 +2402,12 @@ class DeepseekV4Model(nn.Module):
                 hidden_states = last_layer.hc_post(
                     hidden_states, prev_residual, prev_post, prev_comb
                 )
-
+        if not self.pp_group.is_last_rank:
+            # Flatten 3D mHC tensor for PP IPC.
+            return PPProxyTensors({"hidden_states": hidden_states.flatten(1)})
+        need_pre_hc_head = getattr(
+            forward_batch, "return_hidden_states_before_norm", False
+        )
         # CP all-gather only on the last PP rank; PP IPC carries CP-split tensors.
         if self.pp_group.is_last_rank and dsa_use_prefill_cp(forward_batch):
             hidden_states = cp_all_gather_rerange_output(
@@ -2393,12 +2416,8 @@ class DeepseekV4Model(nn.Module):
                 forward_batch,
                 torch.cuda.current_stream(),
             )
-
-        if not self.pp_group.is_last_rank:
-            # Flatten 3D mHC tensor for PP IPC.
-            return PPProxyTensors({"hidden_states": hidden_states.flatten(1)})
-
-        pre_hc_head = hidden_states.flatten(1)
+            return hidden_states, pre_hc_head
+        pre_hc_head = hidden_states.flatten(1) if need_pre_hc_head else None
 
         hidden_states = self.hc_head(
             hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base

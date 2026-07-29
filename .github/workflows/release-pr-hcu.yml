@@ -46,7 +46,7 @@ jobs:
         --cap-add=SYS_PTRACE
         --security-opt seccomp=unconfined
         --privileged=true
-        -v /home/github/sgl_whl_temp:/home/github/sgl_whl_temp
+        -v /ci_public/sglang-das/hcu-wheel-staging:/ci_public/sglang-das/hcu-wheel-staging
 
     # ---- Matrix: 3 个 Python 版本并行编译 ----
     strategy:

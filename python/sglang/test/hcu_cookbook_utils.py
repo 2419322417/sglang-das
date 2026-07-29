@@ -14,6 +14,7 @@
 
 """Helpers for HCU cookbook-style SGLang nightly tests."""
 
+import ast
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import requests
 
 from sglang.srt.utils import kill_process_tree
@@ -32,7 +34,7 @@ from sglang.test.hcu_utils import (
     openai_base_url,
 )
 from sglang.test.run_eval import run_eval
-from sglang.test.test_utils import popen_launch_server
+from sglang.utils import read_jsonl
 
 HCU_COOKBOOK_API_KEY = "sk-123456"
 
@@ -380,6 +382,8 @@ def _glm51_args(quantization: str) -> list[str]:
         "--trust-remote-code",
         "--tp-size",
         "8",
+        "--attention-backend",
+        "nsa",
         "--nsa-prefill-backend",
         "flashmla_auto",
         "--nsa-decode-backend",
@@ -551,46 +555,6 @@ def _kimi_k26_args() -> list[str]:
         "512",
         "--context-length",
         "65536",
-        "--log-level",
-        "warning",
-        "--log-level-http",
-        "warning",
-    ]
-
-
-def _mimo_v2_flash_args() -> list[str]:
-    return [
-        "--pp-size",
-        "1",
-        "--dp-size",
-        "2",
-        "--tp-size",
-        "8",
-        "--page-size",
-        "64",
-        "--trust-remote-code",
-        "--mem-fraction-static",
-        "0.85",
-        "--max-running-requests",
-        "128",
-        "--tool-call-parser",
-        "mimo",
-        "--disable-radix-cache",
-        "--context-length",
-        "262144",
-        "--attention-backend",
-        "triton",
-        "--chunked-prefill-size",
-        "-1",
-        "--enable-dp-attention",
-        "--speculative-algorithm",
-        "EAGLE",
-        "--speculative-num-steps",
-        "3",
-        "--speculative-eagle-topk",
-        "1",
-        "--speculative-num-draft-tokens",
-        "4",
         "--log-level",
         "warning",
         "--log-level-http",
@@ -851,8 +815,8 @@ DEEPSEEK_V32_8GPU_QUANT_MODELS = [DEEPSEEK_V32_CHANNEL_INT8_8GPU]
 MINIMAX_M25_8GPU_MODELS = [MINIMAX_M25_FP8_8GPU]
 MINIMAX_M25_8GPU_PERF_MODELS = [MINIMAX_M25_FP8_8GPU]
 MINIMAX_M25_8GPU_QUANT_MODELS = [MINIMAX_M25_W8A8_8GPU]
-KIMI_MIMO_8GPU_MODELS = [KIMI_K26_8GPU, MIMO_V2_FLASH_8GPU]
-KIMI_MIMO_8GPU_PERF_MODELS = [KIMI_K26_8GPU, MIMO_V2_FLASH_8GPU]
+KIMI_8GPU_MODELS = [KIMI_K26_8GPU]
+KIMI_8GPU_PERF_MODELS = [KIMI_K26_8GPU]
 VLM_COOKBOOK_MODELS = [
     QWEN3_VL_4B_INSTRUCT,
     GLM41V_9B_THINKING,
@@ -904,13 +868,21 @@ def _get_threshold(
     return defaults.get(config.name)
 
 
+def get_cookbook_threshold(
+    config: HcuCookbookModelConfig, defaults: dict[str, float], env_prefix: str
+) -> float | None:
+    """Return the effective threshold after applying per-model env overrides."""
+
+    return _get_threshold(config, defaults, env_prefix)
+
+
 def assert_cookbook_min_score(
     config: HcuCookbookModelConfig,
     metrics: dict,
     defaults: dict[str, float],
     env_prefix: str,
 ) -> None:
-    threshold = _get_threshold(config, defaults, env_prefix)
+    threshold = get_cookbook_threshold(config, defaults, env_prefix)
     if threshold is None:
         return
     score = float(metrics["score"])
@@ -1180,3 +1152,80 @@ def run_cookbook_accuracy_eval(
         f"num_threads={num_threads}, score={score}, latency={latency}"
     )
     return metrics
+
+
+INVALID_GSM8K_ANSWER = -9999999
+
+
+def _gsm8k_answer_value(answer: str) -> int:
+    numbers = re.findall(r"\d+", answer.replace(",", ""))
+    if not numbers:
+        return INVALID_GSM8K_ANSWER
+    try:
+        return int(ast.literal_eval(numbers[-1]))
+    except (SyntaxError, ValueError):
+        return INVALID_GSM8K_ANSWER
+
+
+def _gsm8k_example(lines: list[dict], index: int, include_answer: bool) -> str:
+    text = "Question: " + lines[index]["question"] + "\nAnswer:"
+    if include_answer:
+        text += " " + lines[index]["answer"]
+    return text
+
+
+def run_gsm8k_completion_benchmark(
+    base_url: str,
+    num_questions: int = 200,
+    num_shots: int = 5,
+    parallel: int = 64,
+) -> tuple[float, float, float]:
+    """Run the same few-shot completion GSM8K benchmark used by AMD CI."""
+    import sglang as sgl
+    from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
+
+    data_path = (
+        os.environ.get("SGLANG_HCU_COOKBOOK_GSM8K_DATA_PATH")
+        or os.environ.get("SGLANG_HCU_GSM8K_DATA_PATH")
+        or DEFAULT_HCU_GSM8K_DATA_PATH
+    )
+    data_path = _require_local_data_path(data_path, "GSM8K")
+    lines = list(read_jsonl(data_path))
+    if num_shots + num_questions > len(lines):
+        raise AssertionError(
+            f"GSM8K requires {num_shots + num_questions} rows, got {len(lines)}"
+        )
+
+    few_shot_examples = "".join(
+        _gsm8k_example(lines, index, True) + "\n\n" for index in range(num_shots)
+    )
+    questions = [_gsm8k_example(lines, index, False) for index in range(num_questions)]
+    labels = [
+        _gsm8k_answer_value(lines[index]["answer"]) for index in range(num_questions)
+    ]
+    if any(label == INVALID_GSM8K_ANSWER for label in labels):
+        raise AssertionError("GSM8K contains an answer that cannot be parsed")
+
+    @sgl.function
+    def few_shot_gsm8k(s, question):
+        s += few_shot_examples + question
+        s += sgl.gen(
+            "answer",
+            max_tokens=512,
+            stop=["Question", "Assistant:", "<|separator|>"],
+        )
+
+    backend = RuntimeEndpoint(base_url, api_key=HCU_COOKBOOK_API_KEY)
+    sgl.set_default_backend(backend)
+    start = time.perf_counter()
+    states = few_shot_gsm8k.run_batch(
+        [{"question": question} for question in questions],
+        temperature=0,
+        num_threads=parallel,
+        progress_bar=True,
+    )
+    latency = time.perf_counter() - start
+    predictions = [_gsm8k_answer_value(state["answer"]) for state in states]
+    accuracy = float(np.mean(np.array(predictions) == np.array(labels)))
+    invalid = float(np.mean(np.array(predictions) == INVALID_GSM8K_ANSWER))
+    return accuracy, invalid, latency

@@ -737,7 +737,7 @@ class C4IndexerBackendMixin:
                 )
             else:
                 # from deep_gemm import fp8_paged_mqa_logits as fn
-                from lightop.gemmopt import paged_mqa_logits as fn
+                from lightop.attention import paged_mqa_logits as fn
 
         query_rows = q_indexer[0].shape[0] if use_fp4_indexer else q_indexer.shape[0]
 

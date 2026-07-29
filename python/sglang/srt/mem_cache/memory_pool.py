@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 Copyright 2023-2024 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -2984,12 +2987,26 @@ class MLATokenToKVPool(KVCache):
                     cache_k_rope_fp8,
                 )
         else:
-            if cache_k_nope.dtype != self.dtype:
-                cache_k_nope = cache_k_nope.to(self.dtype)
-                cache_k_rope = cache_k_rope.to(self.dtype)
-            if self.store_dtype != self.dtype:
-                cache_k_nope = cache_k_nope.view(self.store_dtype)
-                cache_k_rope = cache_k_rope.view(self.store_dtype)
+            if _is_hcu:
+                from lightop import kvcache as op
+                if self.dtype == torch.float8_e5m2:
+                    fp8_dtype_str = "fp8_e5m2"
+                else:
+                    fp8_dtype_str = "fp8_e4m3"
+                op.fused_concat_and_store_mla_kv_cache(
+                    cache_k_nope,
+                    cache_k_rope,
+                    self.kv_buffer[layer_id - self.start_layer],
+                    loc,
+                    fp8_dtype_str,
+                )
+            else:
+                if cache_k_nope.dtype != self.dtype:
+                    cache_k_nope = cache_k_nope.to(self.dtype)
+                    cache_k_rope = cache_k_rope.to(self.dtype)
+                if self.store_dtype != self.dtype:
+                    cache_k_nope = cache_k_nope.view(self.store_dtype)
+                    cache_k_rope = cache_k_rope.view(self.store_dtype)
 
             set_mla_kv_buffer_triton(
                 dst_buffer,

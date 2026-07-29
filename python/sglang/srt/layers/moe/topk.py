@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -206,7 +209,7 @@ if _is_musa:
 
     from sglang.srt.hardware_backend.musa.kernels.topk import topk_sigmoid, topk_softmax
 if _use_lightop:
-    from lightop import op as op
+    from lightop import moe as op
 
 _use_lightop_sqrtsoftplus_gate = (
     _use_lightop and _is_hcu and hasattr(op, "moe_fused_gate_sqrtsoftplus")

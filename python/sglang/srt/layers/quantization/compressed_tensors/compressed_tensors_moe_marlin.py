@@ -9,9 +9,19 @@ import torch
 
 from compressed_tensors.quantization import QuantizationStrategy
 import logging
+from typing import List, Optional
+
+import torch
+from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn.parameter import Parameter
 
+from sglang.srt.layers.moe import MoeRunnerConfig
+from sglang.srt.layers.moe.utils import (
+    _get_deepgemm_shuffle_unique,
+    get_moe_a2a_backend,
+)
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
+from sglang.srt.utils import direct_register_custom_op, set_weight_attrs
 
 from sglang.srt.utils import set_weight_attrs, direct_register_custom_op
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
@@ -323,24 +333,28 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from sglang.srt.layers.moe.fused_moe_triton.fused_marlin_moe import (
-            weight8bit_nt_kpack2_marlin,
-        )
 
         if self.use_deepep:
+            from deepgemm import marlin_i8_contiguous_weight, marlin_i8_masked_weight
+
+            shuffle_unique, mode = _get_deepgemm_shuffle_unique()
+
+            # shuffle_unique=1 (IFB): unified 6D format, same pack for prefill+decode
+            # shuffle_unique=0 (PD separation): contiguous for prefill, masked for decode
+            if shuffle_unique == 1 or mode == "prefill":
+                pack_fn = marlin_i8_contiguous_weight
+            else:
+                pack_fn = marlin_i8_masked_weight
+
             layer._dsv4_w13_weight_shape = tuple(layer.w13_weight.shape)
             layer._dsv4_w2_weight_shape = tuple(layer.w2_weight.shape)
-            w13_marlin_list = []
-            for ii in range(layer.w13_weight.shape[0]):
-                w13_marlin_list.append(
-                    w8a8_nt_kpack2_marlin_weight(layer.w13_weight[ii])
-                )
-            w13_lightop = torch.stack(w13_marlin_list, dim=0)
-            layer.w13_weight = Parameter(w13_lightop, requires_grad=False)
+            w13_weight = layer.w13_weight.contiguous()
+            w13_packed = pack_fn(w13_weight, shuffle_unique=shuffle_unique)
+            layer.w13_weight = Parameter(w13_packed, requires_grad=False)
             layer.register_buffer(
                 "w13_weight_deepgemm", layer.w13_weight.data, persistent=False
             )
-            del w13_marlin_list, w13_lightop
+            del w13_packed
             torch.cuda.empty_cache()
 
             w2_marlin_list = []
@@ -351,25 +365,19 @@ class CompressedTensorsW8A8Int8MarlinMoEMethod(CompressedTensorsMarlinMoEMethod)
             layer.register_buffer(
                 "w2_weight_deepgemm", layer.w2_weight.data, persistent=False
             )
-            del w2_marlin_list, w2_lightop
+            del w2_packed
             torch.cuda.empty_cache()
             return
 
         w1_marlin_list = []
         for ii in range(layer.w13_weight.shape[0]):
-            if not self.use_deepep:
-                w1_marlin_in = get_w8a8_int8_marlin_weights(layer.w13_weight[ii])
-            else:
-                w1_marlin_in = weight8bit_nt_kpack2_marlin(layer.w13_weight[ii])
+            w1_marlin_in = get_w8a8_int8_marlin_weights(layer.w13_weight[ii])
             w1_marlin_list.append(w1_marlin_in)
         w1_marlin = torch.stack(w1_marlin_list, dim=0)
 
         w2_marlin_list = []
         for ii in range(layer.w2_weight.shape[0]):
-            if not self.use_deepep:
-                w2_marlin_in = get_w8a8_int8_marlin_weights(layer.w2_weight[ii])
-            else:
-                w2_marlin_in = weight8bit_nt_kpack2_marlin(layer.w2_weight[ii])
+            w2_marlin_in = get_w8a8_int8_marlin_weights(layer.w2_weight[ii])
             w2_marlin_list.append(w2_marlin_in)
         w2_marlin = torch.stack(w2_marlin_list, dim=0)
 

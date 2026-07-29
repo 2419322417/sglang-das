@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -118,7 +121,7 @@ _is_npu = is_npu()
 
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 
 if _is_hcu:
     from lightop.rmsnorm import fused_rms_norm_contiguous

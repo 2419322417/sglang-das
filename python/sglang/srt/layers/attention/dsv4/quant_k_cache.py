@@ -163,7 +163,7 @@ def quant_to_nope_fp8_rope_bf16_pack_lightop(
     k_bf16: torch.Tensor, eps: float = 1e-8
 ) -> NopeFp8RopeBf16Pack:
     """Call the C++ implementation and wrap result in NopeFp8RopeBf16Pack."""
-    from lightop import op
+    from lightop import quant as op
     result = op.quantize_nope_fp8_rope_bf16_pack(k_bf16, eps)
     k_nope_fp8_u8, k_rope_bf16, scale_k_nope = result
     # C++ returns k_nope_fp8 as uint8; view as fp8 for the dataclass
