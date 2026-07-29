@@ -1,12 +1,6 @@
 name: Runner Utilization Report
 
 on:
-  schedule:
-    - cron: '0 8 * * *'  # Daily at 8 AM UTC
-  pull_request:
-    paths:
-      - '.github/workflows/runner-utilization.yml'
-      - 'scripts/ci/utils/runner_utilization_report.py'
   workflow_dispatch:
     inputs:
       hours:
@@ -23,6 +17,7 @@ on:
 # group, every push spawns another 24h API scan that races the previous ones
 # and drains the shared 15k/hr installation token quota. Cancel-in-progress
 # keeps at most one Runner Utilization run per ref alive at a time.
+
 concurrency:
   group: runner-utilization-${{ github.ref }}
   cancel-in-progress: true

@@ -14,11 +14,6 @@ name: PR Test (sgl-router)
 #   * `push` on `main` keeps firing so post-merge runs still record
 #     against the default branch.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 concurrency:

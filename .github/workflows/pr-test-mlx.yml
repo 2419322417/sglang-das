@@ -1,8 +1,6 @@
 name: PR Test (MLX)
 
 on:
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       # target_stage is the job id (e.g. stage-b-e2e-test-mlx), distinct from

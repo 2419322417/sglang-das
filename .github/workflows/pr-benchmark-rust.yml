@@ -1,14 +1,6 @@
 name: PR Benchmark (SMG Components)
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "sgl-model-gateway/**"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "sgl-model-gateway/**"
   workflow_dispatch:
 
 concurrency:

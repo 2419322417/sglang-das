@@ -9,31 +9,6 @@ name: CI Model Inventory
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "test/registered/**"
-      - "test/run_suite.py"
-      - "python/sglang/test/test_utils.py"
-      - "python/sglang/test/lora_utils.py"
-      - "python/sglang/test/ci/**"
-      - "scripts/ci/list_stage_models.py"
-      - "scripts/ci/stage_models_overrides.json"
-      - "scripts/ci/runner_configs.yml"
-      - ".github/workflows/ci-model-inventory.yml"
-  pull_request:
-    # Validate the tool itself end-to-end when it changes. Deliberately NOT
-    # filtered on test/registered/** -- that would run on most PRs; the
-    # published inventory is refreshed by the push-to-main trigger instead.
-    paths:
-      - "scripts/ci/list_stage_models.py"
-      - "scripts/ci/test_list_stage_models.py"
-      - "scripts/ci/stage_models_overrides.json"
-      - ".github/workflows/ci-model-inventory.yml"
-  schedule:
-    # Nightly safety net (09:00 UTC) so the artifact never goes stale even if a
-    # change lands outside the path filter above.
-    - cron: "0 9 * * *"
 
 jobs:
   build-inventory:

@@ -1,9 +1,6 @@
 name: PR Test (NPU)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
   workflow_dispatch:
   workflow_call:
     inputs:

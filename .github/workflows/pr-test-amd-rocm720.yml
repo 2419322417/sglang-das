@@ -4,28 +4,6 @@ name: PR Test ROCm 7.2 (AMD)
 run-name: ${{ (inputs.target_stage || inputs.target_stage_select) && (inputs.pr_head_sha && format('[{0}] {1}', inputs.target_stage || inputs.target_stage_select, inputs.pr_head_sha) || format('[{0}]', inputs.target_stage || inputs.target_stage_select)) || '' }}
 
 on:
-  schedule:
-    - cron: '30 17 * * *'
-    # Temporarily disabled: every-6-hours dsv4 accuracy run. Daily '30 17 * * *'
-    # cron still runs the full suite (including dsv4). Re-enable to restore it.
-    # - cron: '0 */6 * * *' # Every 6 hours (UTC): target dsv4 accuracy jobs only
-  # push:
-  #   branches: [ main ]
-  #   paths:
-  #     - "python/**"
-  #     - "scripts/ci/**"
-  #     - "test/**"
-  #     - "sgl-kernel/**"
-  #     - ".github/workflows/pr-test-amd-rocm720.yml"
-  #     - "docker/rocm.Dockerfile"
-  # pull_request:
-  #   paths:
-  #     - "python/**"
-  #     - "scripts/ci/**"
-  #     - "test/**"
-  #     - "sgl-kernel/**"
-  #     - ".github/workflows/pr-test-amd-rocm720.yml"
-  #     - "docker/rocm.Dockerfile"
   workflow_dispatch:
     inputs:
       target_stage_select:
@@ -107,6 +85,7 @@ on:
 # pull-requests: read. A called reusable workflow can only use scopes the
 # caller already holds, so without this block the call fails workflow
 # validation ("requesting actions: write... but only allowed ...none").
+
 permissions:
   actions: write
   contents: read
