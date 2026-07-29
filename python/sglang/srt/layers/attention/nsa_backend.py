@@ -1559,22 +1559,13 @@ class NativeSparseAttnBackend(
                             f"page_table_rows={page_table_rows}, "
                             f"topk_rows={topk_rows}, forward_mode={forward_mode}"
                         )
-                        localized = transform_index_page_table_decode(
+                        # The batched Triton mapper marks rows beyond the page
+                        # table as -1, including DP/CUDA-graph padding rows.
+                        page_table_1 = transform_index_page_table_decode(
                             page_table=metadata.page_table_1,
-                            topk_indices=topk_indices[:page_table_rows],
+                            topk_indices=topk_indices,
                             page_size=1,
                         )
-                        if page_table_rows < topk_rows:
-                            padding = localized.new_full(
-                                (
-                                    topk_rows - page_table_rows,
-                                    *topk_indices.shape[1:],
-                                ),
-                                -1,
-                            )
-                            page_table_1 = torch.cat([localized, padding], dim=0)
-                        else:
-                            page_table_1 = localized
                     else:
                         extend_lens_cpu = self._get_topk_transform_lens(
                             forward_batch,
@@ -1586,6 +1577,7 @@ class NativeSparseAttnBackend(
                             topk_indices=topk_indices,
                             extend_lens_cpu=extend_lens_cpu,
                             page_size=1,
+                            page_table_row_indices=metadata.token_to_batch_idx,
                         )
 
         # todo hisparse: to cover more backends
@@ -2284,6 +2276,7 @@ class NativeSparseAttnBackend(
                 topk_indices=topk_indices,
                 extend_lens_cpu=metadata.nsa_extend_seq_lens_list,
                 page_size=1,
+                page_table_row_indices=metadata.token_to_batch_idx,
             )
         else:
             page_table_1 = self._transform_decode_topk_indices(
@@ -2421,19 +2414,11 @@ class NativeSparseAttnBackend(
             f"uses_logical_indices={uses_logical_indices}"
         )
 
-        localized = (
-            transform_index_page_table_decode(
-                page_table=page_table,
-                topk_indices=topk_indices[:page_table_rows],
-                page_size=1,
-            )
-            if page_table_rows > 0
-            else topk_indices[:0]
+        return transform_index_page_table_decode(
+            page_table=page_table,
+            topk_indices=topk_indices,
+            page_size=1,
         )
-        padding = localized.new_full(
-            (topk_rows - page_table_rows, *topk_indices.shape[1:]), -1
-        )
-        return torch.cat([localized, padding], dim=0)
 
     @staticmethod
     def _pad_topk_indices_offset(
