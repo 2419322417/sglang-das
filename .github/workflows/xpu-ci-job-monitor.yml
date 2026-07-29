@@ -1,12 +1,6 @@
 name: XPU CI Job Monitor
 
 on:
-  schedule:
-    - cron: '0 0 * * *'  # Daily at midnight UTC
-  pull_request:
-    paths:
-      - '.github/workflows/xpu-ci-job-monitor.yml'
-      - 'scripts/ci/utils/xpu_job_monitor.py'
   workflow_dispatch:
     inputs:
       hours:
@@ -21,6 +15,7 @@ on:
 
 # Bound the API cost when the same ref pushes repeatedly. See note in
 # runner-utilization.yml for the original incident this guards against.
+
 concurrency:
   group: xpu-ci-job-monitor-${{ github.ref }}
   cancel-in-progress: true

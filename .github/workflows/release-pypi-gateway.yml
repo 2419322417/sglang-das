@@ -1,11 +1,6 @@
 name: Release SGLang Model Gateway to PyPI
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - sgl-model-gateway/bindings/python/pyproject.toml
   workflow_dispatch:
 
 jobs:

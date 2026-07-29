@@ -1,10 +1,5 @@
 name: Release SGLang Model Gateway Docker Image
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - sgl-model-gateway/bindings/python/pyproject.toml
   workflow_dispatch:
 
 jobs:
