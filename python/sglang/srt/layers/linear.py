@@ -71,7 +71,11 @@ if _use_fused_silu_mul_quant:
         print(f"Error: Import fused silu_mul_quant error: {e}")
 
 if _use_fused_bailing_silu_mul_fp8_quant or _use_fused_dpskv4_silu_mul_fp8_quant:
-    from lightop.activation import fuse_silu_mul_fp8_quant
+    try:
+        from lightop.activation import fuse_silu_mul_fp8_quant
+    except ImportError:
+        # Current HCU wheels export this operator from the package root.
+        from lightop import fuse_silu_mul_fp8_quant
 
 if _use_fused_bailing_silu_mul_fp8_quant or _use_fused_dpskv4_silu_mul_fp8_quant:
     import deepgemm
