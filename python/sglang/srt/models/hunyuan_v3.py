@@ -71,7 +71,7 @@ from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import get_bool_env_var, is_cuda, is_hcu, make_layers
+from sglang.srt.utils import get_bool_env_var, is_cuda, is_hcu, is_hip, make_layers
 from sglang.srt.utils.common import LazyValue
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 from torch import nn
@@ -79,6 +79,11 @@ from transformers import PretrainedConfig
 
 _is_hcu = is_hcu()
 _use_fused_hunyuan_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
+# Same env as DeepSeek: aiter MoE applies routed_scaling_factor internally.
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
+# lightop moe_fused_gate bakes routed_scaling_factor into topk_weights when
+# apply_routed_scaling_factor_on_output is False.
+_use_lightop = get_bool_env_var("SGLANG_USE_LIGHTOP")
 
 if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
@@ -245,6 +250,36 @@ class HYV3MoEFused(nn.Module):
                 result.append(x)
         return result
 
+    def _combine_routed_and_shared(
+        self,
+        final_hidden_states: torch.Tensor,
+        shared_output: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Combine routed MoE output with shared MLP; apply router_scaling_factor once.
+
+        Post-multiply only when TopK left renormalized probabilities (sum≈1).
+        Skip when scaling was already applied upstream:
+        - ``should_fuse_routed_scaling_factor_in_topk``: baked into topk_weights
+        - ``SGLANG_USE_LIGHTOP``: lightop ``moe_fused_gate`` bakes rsf into weights
+        - ``SGLANG_USE_AITER``: same guard as DeepSeek (aiter MoE applies rsf)
+
+        This keeps the fix Hy3-local and avoids double-scaling on lightop/aiter.
+        """
+        scale_already_applied = (
+            self.experts.should_fuse_routed_scaling_factor_in_topk
+            or _use_lightop
+            or _use_aiter
+        )
+        if scale_already_applied:
+            if shared_output is not None:
+                return final_hidden_states + shared_output
+            return final_hidden_states
+
+        rsf = self.router_scaling_factor
+        if shared_output is not None:
+            return shared_output + final_hidden_states * rsf
+        return final_hidden_states * rsf
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -298,8 +333,9 @@ class HYV3MoEFused(nn.Module):
                 topk_output=topk_output,
             )
 
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        final_hidden_states = self._combine_routed_and_shared(
+            final_hidden_states, shared_output
+        )
 
         return final_hidden_states.view(orig_shape)
 
@@ -352,10 +388,15 @@ class HYV3MoEFused(nn.Module):
                 final_hidden_states = self.experts(
                     hidden_states=hidden_states, topk_output=topk_output
                 )
-                final_hidden_states = final_hidden_states + shared_output
+                final_hidden_states = self._combine_routed_and_shared(
+                    final_hidden_states, shared_output
+                )
             else:
                 final_hidden_states = self.experts(
                     hidden_states=hidden_states, topk_output=topk_output
+                )
+                final_hidden_states = self._combine_routed_and_shared(
+                    final_hidden_states, None
                 )
 
         if self.ep_size > 1 and not should_skip_post_experts_all_reduce(
@@ -412,8 +453,12 @@ class HYV3MoEFused(nn.Module):
         if get_moe_a2a_backend().is_deepep():
             if self.dense_tp_size > 1:
                 shared_output = tensor_model_parallel_all_reduce(shared_output)
-            return (final_hidden_states + shared_output).view(orig_shape)
-        final_hidden_states = final_hidden_states + shared_output
+            return self._combine_routed_and_shared(
+                final_hidden_states, shared_output
+            ).view(orig_shape)
+        final_hidden_states = self._combine_routed_and_shared(
+            final_hidden_states, shared_output
+        )
 
         if self.ep_size > 1 and not should_skip_post_experts_all_reduce(
             is_tp_path=False,
