@@ -41,7 +41,11 @@ from torch.cuda import Stream as CudaStream
 from torch.distributed import barrier
 
 from sglang.jit_kernel.ngram_embedding import update_token_table
-from sglang.srt.configs.model_config import ModelConfig, ModelImpl
+from sglang.srt.configs.model_config import (
+    ModelConfig,
+    ModelImpl,
+    get_mtp_index_share_topk,
+)
 from sglang.srt.constants import HEALTH_CHECK_RID_PREFIX
 from sglang.srt.constrained.grammar_manager import GrammarManager
 from sglang.srt.disaggregation.decode import (
@@ -1222,9 +1226,7 @@ class Scheduler(
             and self.server_args.enable_dp_attention
         ):
             if not self.require_mlp_sync:
-                raise RuntimeError(
-                    "PD Decode DP sync requires require_mlp_sync=True"
-                )
+                raise RuntimeError("PD Decode DP sync requires require_mlp_sync=True")
             if self.pp_size != 1:
                 raise RuntimeError(
                     "PD Decode DP sync currently supports pp_size=1 only"
@@ -1237,9 +1239,7 @@ class Scheduler(
 
             tp_ranks = list(self.tp_group.ranks)
             expected_world = (
-                self.server_args.dp_size
-                * self.attn_tp_size
-                * self.attn_cp_size
+                self.server_args.dp_size * self.attn_tp_size * self.attn_cp_size
             )
             default_world = torch.distributed.get_world_size()
             if len(tp_ranks) != expected_world or len(tp_ranks) != default_world:
@@ -1281,6 +1281,9 @@ class Scheduler(
         # when this node runs a spec module.
         if model_config is None:
             model_config = self.model_config
+        # This is part of the P/D metadata wire schema, so both sides derive
+        # the width from the same model config.
+        mtp_topk_indices_dim = get_mtp_index_share_topk(model_config.hf_config)
 
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
@@ -1302,6 +1305,7 @@ class Scheduler(
                     else torch.float32
                 ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                mtp_topk_indices_dim=mtp_topk_indices_dim,
             )
 
             # The decode requests polling kv cache
@@ -1313,7 +1317,7 @@ class Scheduler(
                 scheduler=self,
                 tree_cache=self.tree_cache,
             )
-           
+
             # The decode requests pending for pre-allocation
             self.disagg_decode_prealloc_queue = DecodePreallocQueue(
                 req_to_token_pool=self.req_to_token_pool,
@@ -1357,6 +1361,7 @@ class Scheduler(
                     else torch.float32
                 ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                mtp_topk_indices_dim=mtp_topk_indices_dim,
             )
 
             self.disagg_prefill_bootstrap_queue = PrefillBootstrapQueue(
@@ -1422,6 +1427,7 @@ class Scheduler(
             self.model_config.context_len,
             self.device,
             self.spec_algorithm,
+            mtp_topk_indices_dim=get_mtp_index_share_topk(self.model_config.hf_config),
         )
         self.batch_record_buf = [None] * 2
         self.batch_record_ct = 0

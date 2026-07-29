@@ -722,6 +722,7 @@ class TboForwardBatchPreparer:
             # mHC target models (e.g. DSV4-Flash) need pre-hc-head hidden states;
             # this forward-level flag must survive the TBO split for target-verify.
             "return_hidden_states_before_norm",
+            "capture_mtp_topk_indices",  # forward-level flag, inherited by both child batches
         ]:
             output_dict[key] = getattr(batch, key)
 

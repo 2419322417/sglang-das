@@ -291,6 +291,7 @@ class DecodeRequest:
     def priority(self) -> Optional[int]:
         return self.req.priority
 
+
 class DecodePreallocQueue:
     """
     Store the requests that are preallocating.
@@ -1447,6 +1448,7 @@ class DecodeTransferQueue:
             output_topk_p,
             output_topk_index,
             output_hidden_states,
+            output_mtp_topk_indices,
             output_bootstrap_room,
         ) = self.metadata_buffers.get_buf(idx)
 
@@ -1494,6 +1496,7 @@ class DecodeTransferQueue:
             decode_req.req.output_topk_p = output_topk_p
             decode_req.req.output_topk_index = output_topk_index
             decode_req.req.hidden_states_tensor = output_hidden_states
+            decode_req.req.mtp_topk_indices_tensor = output_mtp_topk_indices
 
         if decode_req.req.return_logprob:
             decode_req.req.output_token_logprobs_val.append(
@@ -1831,9 +1834,7 @@ class SchedulerDisaggregationDecodeMixin:
             if self.polling_count % self.polling_interval == 0:
                 req_conns, _ = self.disagg_decode_prealloc_queue.pop_preallocated()
                 self.disagg_decode_transfer_queue.extend(req_conns)
-                transferred_reqs = (
-                    self.disagg_decode_transfer_queue.pop_transferred()
-                )
+                transferred_reqs = self.disagg_decode_transfer_queue.pop_transferred()
                 if self.enable_hisparse:
                     for req in transferred_reqs:
                         self.hisparse_coordinator.admit_request_direct(req)

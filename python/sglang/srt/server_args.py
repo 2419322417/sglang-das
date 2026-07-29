@@ -42,21 +42,21 @@ from sglang.srt.utils.common import (
     LORA_TARGET_ALL_MODULES,
     SUPPORTED_LORA_TARGET_MODULES,
     cpu_has_amx_support,
+    get_bool_env_var,
     get_device,
     get_device_memory_capacity,
     get_device_name,
     get_device_sm,
     get_nvidia_driver_version,
-    get_bool_env_var,
     get_quantization_config,
     has_fp8_weights_in_checkpoint,
     human_readable_int,
     is_blackwell_supported,
     is_cpu,
     is_cuda,
+    is_flashinfer_available,
     is_hcu,
     is_hcu_native_fp8_supported,
-    is_flashinfer_available,
     is_hip,
     is_hopper_with_cuda_12_3,
     is_host_cpu_arm64,
@@ -1930,9 +1930,15 @@ class ServerArgs:
                             assert (
                                 self.dp_size == 1
                             ), "For round-robin split mode, dp attention is not supported."
-                        assert (
-                            self.tp_size <= 8
-                        ), "Context parallel only supports single machine (tp_size <= 8). Cross-machine CP has precision issues."
+                        # HCU nodes expose 16 GPUs on one machine. Keep the
+                        # upstream eight-GPU limit for other platforms, where
+                        # a larger TP group would span machines.
+                        max_single_node_tp_size = 16 if is_hcu() else 8
+                        assert self.tp_size <= max_single_node_tp_size, (
+                            "Context parallel only supports a single machine "
+                            f"(tp_size <= {max_single_node_tp_size}). "
+                            "Cross-machine CP has precision issues."
+                        )
                         self.attn_cp_size = self.tp_size // self.dp_size
 
                         logger.warning(
