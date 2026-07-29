@@ -1964,3 +1964,30 @@ actual result in the checkpoint note.
     to VRAM/HCU 0%.
 - Detailed evidence:
   `docs/internal/dcu-v0.5.15-post1-dev-forward-port-20260722-conflict-review.md`.
+
+### v0.5.12_dev daily forward-port / `ac04c9cb` (2026-07-29)
+
+- Branch: `forward-port/v0.5.12-dev-daily-20260729`.
+- Target parent: `997e64560f65d6dffa96b191ca3eb3961903620a`
+  (`v0.5.15.post1_dev`); source endpoint: `ac04c9cb4471d3486930824196f481896f6aa1b4`.
+- Range: `5dd9ba2f2c48e98aa0f244a665bb67cde7141699..ac04c9cb`, 82 full-graph
+  commits (31 first-parent commits), spanning the HCU rename, LightOp/MLA,
+  DeepGEMM/KME, DeepSeek-V4 INT8/MTP, Qwen3-Coder, GLM-5.1 NSA, and CI updates.
+- Merge: `d42b0a3bf6b4317fd3d420375b4d16239b96e3cb`; focused LightOp compatibility
+  fix: `3b4327cd7bb428ab98828f0cdc31106d51cd86b2`.
+- Conflict/refactor decisions:
+  - retained the current target structure for refactored allocator, CUDA-graph
+    runner, DSV4 JIT, EAGLE v2, and target test registration paths; obsolete
+    source files were not restored;
+  - retained compatible source runtime, kernel, HCU, LightOp, quantization,
+    DSV4, cache, scheduler, and model changes; test tree stays on the target
+    API because source test merges were syntactically incompatible;
+  - runtime audit found no `_is_dcu` / `is_dcu` predicate in `python/sglang/srt`,
+    `python/sglang/kernels`, or `sgl-kernel`; platform-specific paths use
+    `_is_hcu` conventions. `SGLANG_USE_AITER_AG=0` remains unchanged.
+- Static validation passed: zero unmerged entries, precise marker scan,
+  `git diff --check`, 158 changed Python files compiled, HCU registration
+  (290 files), DSA alias/CLI/registry (19 tests), and gfx938 HIP metadata
+  (0 unsupported CUDA calls, 56 replaced launches). Ruff is unavailable in
+  `rye_sglang_0716`.
+- Pure-TP validation is blocked and the branch is deliberately **not** merged
