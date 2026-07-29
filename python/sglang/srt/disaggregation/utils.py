@@ -333,9 +333,7 @@ class MetadataBuffers:
             )
         if self.output_mtp_topk_indices is not None:
             valid = req.mtp_topk_indices_tensor is not None
-            self.output_mtp_topk_indices_valid[
-                req.metadata_buffer_index, 0
-            ] = valid
+            self.output_mtp_topk_indices_valid[req.metadata_buffer_index, 0] = valid
             if valid:
                 self.output_mtp_topk_indices[req.metadata_buffer_index].copy_(
                     req.mtp_topk_indices_tensor

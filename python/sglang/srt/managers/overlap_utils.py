@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from sglang.srt.speculative.spec_utils import spec_need_hidden_states
-from sglang.srt.utils import is_cuda, is_hip, is_hcu
+from sglang.srt.utils import is_cuda, is_hcu, is_hip
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ModelWorkerBatch
@@ -41,7 +41,7 @@ def _resolve_future_token_ids_native(input_ids, future_token_ids_map):
     )
 
 
-if (_is_cuda or _is_hip) and not _is_hcu :
+if (_is_cuda or _is_hip) and not _is_hcu:
     from sglang.jit_kernel.resolve_future_token_ids import (
         resolve_future_token_ids_cuda,
     )

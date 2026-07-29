@@ -299,9 +299,9 @@ class EagleDraftWorker(BaseDraftWorker):
             draft_backend_factory.create_draft_extend_backend()
         )
         actual_draft_attn_backend = self.draft_runner.attn_backend
-        if _is_nsa_attn_backend(
-            actual_draft_attn_backend
-        ) and not _is_nsa_attn_backend(self.draft_extend_attn_backend):
+        if _is_nsa_attn_backend(actual_draft_attn_backend) and not _is_nsa_attn_backend(
+            self.draft_extend_attn_backend
+        ):
             log_info_on_rank0(
                 logger,
                 "Using the draft model's NSA attention backend for draft extend "
@@ -632,9 +632,7 @@ class EagleDraftWorker(BaseDraftWorker):
         last accepted row already used for logits and hidden states.
         """
         next_draft_input.mtp_topk_indices = None
-        if not is_mtp_index_share_enabled(
-            self.draft_runner.model_config.hf_config
-        ):
+        if not is_mtp_index_share_enabled(self.draft_runner.model_config.hf_config):
             return
 
         topk_indices = forward_batch.topk_indices if source is None else source

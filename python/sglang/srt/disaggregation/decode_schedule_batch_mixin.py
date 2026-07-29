@@ -163,9 +163,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
             hidden_states_list = [req.hidden_states_tensor for req in self.reqs]
             hidden_states = torch.stack(hidden_states_list, dim=0).to(self.device)
 
-            mtp_indices_list = [
-                req.mtp_topk_indices_tensor for req in self.reqs
-            ]
+            mtp_indices_list = [req.mtp_topk_indices_tensor for req in self.reqs]
             mtp_topk_indices = (
                 torch.stack(mtp_indices_list, dim=0).to(self.device)
                 if mtp_indices_list and all(x is not None for x in mtp_indices_list)

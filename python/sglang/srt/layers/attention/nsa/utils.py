@@ -89,9 +89,7 @@ def effective_forward_mode(forward_batch: "ForwardBatch"):
     otherwise it interprets speculative metadata as prefill metadata.
     """
 
-    return getattr(
-        forward_batch, "_original_forward_mode", forward_batch.forward_mode
-    )
+    return getattr(forward_batch, "_original_forward_mode", forward_batch.forward_mode)
 
 
 # Legacy alias for internal call sites that predate the public helper.

@@ -53,7 +53,7 @@ from sglang.srt.layers.attention.utils import (
 )
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
-from sglang.srt.utils import is_cuda, is_hip, is_hcu
+from sglang.srt.utils import is_cuda, is_hcu, is_hip
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -279,7 +279,10 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                 fast_topk_v2,
             )
         else:
-            from lightop.attention import fast_topk_transform_fused, fast_topk_transform_ragged_fused
+            from lightop.attention import (
+                fast_topk_transform_fused,
+                fast_topk_transform_ragged_fused,
+            )
             from sgl_kernel import fast_topk_v2
 
         if topk_indices_offset_override is not None:
@@ -1131,9 +1134,7 @@ class NativeSparseAttnBackend(
                 # num_accept_tokens only describes which rows are committed;
                 # using it here would leave an uninitialized suffix in the
                 # fixed bs * N attention metadata buffer.
-                extend_seq_lens = spec_info.extend_seq_lens_tensor[:bs].to(
-                    torch.int32
-                )
+                extend_seq_lens = spec_info.extend_seq_lens_tensor[:bs].to(torch.int32)
                 extend_num_tokens = bs * self.speculative_num_draft_tokens
                 page_indices = torch.repeat_interleave(
                     page_indices,
@@ -1516,14 +1517,11 @@ class NativeSparseAttnBackend(
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
 
         # NOTE(dark): here, we use page size = 1
-        topk_transform_method = self.get_topk_transform_method(
-            forward_mode
-        )
+        topk_transform_method = self.get_topk_transform_method(forward_mode)
         # MTP capture/reuse carries allocator-independent logical positions.
         # A fused top-k result is already mapped for one worker's allocator.
-        if (
-            envs.SGLANG_NSA_FUSE_TOPK.get()
-            and not self._uses_logical_mtp_topk_indices(forward_batch)
+        if envs.SGLANG_NSA_FUSE_TOPK.get() and not self._uses_logical_mtp_topk_indices(
+            forward_batch
         ):
             page_table_1 = topk_indices
         else:
@@ -1550,12 +1548,9 @@ class NativeSparseAttnBackend(
                         topk_indices,
                     )
                 else:
-                    if (
-                        self._uses_logical_mtp_topk_indices(forward_batch)
-                        and (
-                            forward_mode.is_target_verify()
-                            or forward_mode.is_draft_extend(include_v2=True)
-                        )
+                    if self._uses_logical_mtp_topk_indices(forward_batch) and (
+                        forward_mode.is_target_verify()
+                        or forward_mode.is_draft_extend(include_v2=True)
                     ):
                         page_table_rows = metadata.page_table_1.shape[0]
                         topk_rows = topk_indices.shape[0]
@@ -1886,7 +1881,7 @@ class NativeSparseAttnBackend(
         sm_scale: float,
     ) -> torch.Tensor:
         if not _is_hcu:
-            from sgl_kernel.flash_mla import flash_mla_sparse_fwd 
+            from sgl_kernel.flash_mla import flash_mla_sparse_fwd
         else:
             from flash_mla.flash_mla_interface import flash_mla_sparse_fwd
 
@@ -1993,7 +1988,6 @@ class NativeSparseAttnBackend(
             o = o[:, :, :num_q_heads, :]
 
         return o
-
 
     def _forward_standard_mha(
         self,
@@ -2280,9 +2274,8 @@ class NativeSparseAttnBackend(
         if topk_indices is not None:
             topk_indices = self._pad_topk_indices(topk_indices, q.shape[0])
 
-        if (
-            envs.SGLANG_NSA_FUSE_TOPK.get()
-            and not self._uses_logical_mtp_topk_indices(forward_batch)
+        if envs.SGLANG_NSA_FUSE_TOPK.get() and not self._uses_logical_mtp_topk_indices(
+            forward_batch
         ):
             page_table_1 = topk_indices
         elif is_prefill:
@@ -2357,9 +2350,7 @@ class NativeSparseAttnBackend(
     @staticmethod
     def _uses_logical_mtp_topk_indices(forward_batch: ForwardBatch) -> bool:
         """Whether this forward must keep top-k in allocator-independent form."""
-        predicate = getattr(
-            forward_batch, "uses_logical_mtp_topk_indices", None
-        )
+        predicate = getattr(forward_batch, "uses_logical_mtp_topk_indices", None)
         if predicate is not None:
             return bool(predicate())
         return bool(
@@ -2380,9 +2371,7 @@ class NativeSparseAttnBackend(
         planned_rows = getattr(
             forward_batch, "forward_metadata_planned_num_tokens", None
         )
-        planned_batch_size = getattr(
-            forward_batch, "forward_metadata_planned_bs", None
-        )
+        planned_batch_size = getattr(forward_batch, "forward_metadata_planned_bs", None)
         original_batch_size = getattr(forward_batch, "_original_batch_size", None)
         if (
             isinstance(planned_rows, int)
@@ -2475,17 +2464,11 @@ class NativeSparseAttnBackend(
         topk_indices_offset = metadata.topk_indices_offset
         assert topk_indices_offset is not None
 
-        if (
-            nsa_use_prefill_cp(forward_batch)
-            and is_nsa_prefill_cp_in_seq_split()
-        ):
+        if nsa_use_prefill_cp(forward_batch) and is_nsa_prefill_cp_in_seq_split():
             assert metadata.page_table_1.shape[0] == 1
             return topk_indices_offset[:1].expand(num_tokens)
 
-        assert (
-            topk_indices_offset.shape[0]
-            == metadata.nsa_seqlens_expanded.shape[0]
-        ), (
+        assert topk_indices_offset.shape[0] == metadata.nsa_seqlens_expanded.shape[0], (
             "topk_indices_offset must have one row per logical NSA query token: "
             f"{topk_indices_offset.shape[0]} != "
             f"{metadata.nsa_seqlens_expanded.shape[0]}"
@@ -2498,10 +2481,7 @@ class NativeSparseAttnBackend(
         metadata: NSAMetadata,
         num_tokens: int,
     ) -> List[int]:
-        if (
-            nsa_use_prefill_cp(forward_batch)
-            and is_nsa_prefill_cp_in_seq_split()
-        ):
+        if nsa_use_prefill_cp(forward_batch) and is_nsa_prefill_cp_in_seq_split():
             assert metadata.page_table_1.shape[0] == 1
             return [num_tokens]
 
@@ -2568,7 +2548,7 @@ class NativeSparseAttnBackend(
         if not self.use_mha and self.enable_auto_select_prefill_impl:
             if self.nsa_kv_cache_store_fp8:
                 if (
-                    ( is_blackwell() or _is_hcu )
+                    (is_blackwell() or _is_hcu)
                     and forward_batch is not None
                     and forward_batch.forward_mode == ForwardMode.EXTEND
                 ):
@@ -2607,17 +2587,13 @@ class NativeSparseAttnBackend(
         forward_mode = effective_forward_mode(forward_batch)
         # Cross-P/D MTP sharing must carry logical positions. Fused top-k
         # produces allocator-local indices that another worker cannot reuse.
-        force_unfused = self._uses_logical_mtp_topk_indices(
-            forward_batch
-        ) or (
+        force_unfused = self._uses_logical_mtp_topk_indices(forward_batch) or (
             forward_batch.hisparse_coordinator is not None
             and forward_mode.is_decode_or_idle()
         )
         return NSAIndexerMetadata(
             attn_metadata=self.forward_metadata,
-            topk_transform_method=self.get_topk_transform_method(
-                forward_mode
-            ),
+            topk_transform_method=self.get_topk_transform_method(forward_mode),
             paged_mqa_schedule_metadata=self.forward_metadata.paged_mqa_schedule_metadata,
             force_unfused_topk=force_unfused,
         )
@@ -2664,6 +2640,7 @@ class NativeSparseAttnMultiStepBackend:
                     speculative_num_steps=self.speculative_num_steps,
                 )
             )
+
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         for i in range(self.speculative_num_steps - 1):
             self.attn_backends[i].init_forward_metadata(forward_batch)

@@ -2531,7 +2531,8 @@ class MooncakeKVReceiver(CommonKVReceiver):
 
             sock, lock = self._connect_to_bootstrap_server(bootstrap_info)
             with lock:
-                self._safe_send_multipart(sock, 
+                self._safe_send_multipart(
+                    sock,
                     [
                         "None".encode("ascii"),
                         self.kv_mgr.local_ip.encode("ascii"),
@@ -2548,7 +2549,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         enable_hisparse,
                         packed_staging_base_ptr,
                         staging_total_size_str,
-                    ]
+                    ],
                 )
 
     def init(
@@ -2586,7 +2587,8 @@ class MooncakeKVReceiver(CommonKVReceiver):
             is_dummy = bootstrap_info["is_dummy"]
 
             with lock:
-                self._safe_send_multipart(sock, 
+                self._safe_send_multipart(
+                    sock,
                     [
                         str(self.bootstrap_room).encode("ascii"),
                         self.kv_mgr.local_ip.encode("ascii"),
@@ -2601,7 +2603,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         ),
                         str(self.required_dst_info_num).encode("ascii"),
                         str(decode_prefix_len or 0).encode("ascii"),
-                    ]
+                    ],
                 )
         self.init_time = time.time()
 

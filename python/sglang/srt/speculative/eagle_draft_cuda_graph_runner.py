@@ -153,9 +153,7 @@ class EAGLEDraftCudaGraphRunner:
                 else None
             )
             mtp_topk_indices = (
-                torch.zeros(
-                    (self.max_bs, self.mtp_index_share_topk), dtype=torch.int32
-                )
+                torch.zeros((self.max_bs, self.mtp_index_share_topk), dtype=torch.int32)
                 if self.enable_mtp_index_share
                 else None
             )

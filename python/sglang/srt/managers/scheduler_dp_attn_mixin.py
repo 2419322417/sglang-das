@@ -49,7 +49,6 @@ def _mtp_draft_seed_missing(local_batch: Optional[ScheduleBatch]) -> bool:
     return seed is None or seed.shape[0] != local_batch.batch_size()
 
 
-
 @dataclass
 class MLPSyncBatchInfo:
     dp_size: int
@@ -121,8 +120,7 @@ class MLPSyncBatchInfo:
         if self.scheduler_step_info is not None and device == "cpu":
             # Use list all_gather for ROCm/HCU Gloo builds where _allgather_base may be unavailable.
             gathered = [
-                torch.empty_like(local_info_tensor)
-                for _ in range(actual_world)
+                torch.empty_like(local_info_tensor) for _ in range(actual_world)
             ]
             torch.distributed.all_gather(
                 gathered,
@@ -237,11 +235,7 @@ class MLPSyncBatchInfo:
                 )
 
         if _ENABLE_METRICS_DP_ATTENTION:
-            self.dp_cooperation_info = DPCooperationInfo.create(
-                tp0_info[:, 5].tolist()
-            )
-
-
+            self.dp_cooperation_info = DPCooperationInfo.create(tp0_info[:, 5].tolist())
 
 
 def _update_gather_batch(
@@ -398,9 +392,7 @@ class SchedulerDPAttnMixin:
         sync_group_override = None
         epoch = None
         if is_disagg_decode:
-            sync_group_override = getattr(
-                self, "dp_scheduler_cpu_group", None
-            )
+            sync_group_override = getattr(self, "dp_scheduler_cpu_group", None)
             if sync_group_override is None:
                 raise RuntimeError(
                     "dedicated dp_scheduler_cpu_group is not initialized"
