@@ -190,32 +190,36 @@ class MLPSyncBatchInfo:
         if self.scheduler_step_info is not None:
             step_tp0 = tp0_info[:, 6:].cpu()
             self.gathered_scheduler_step_info = step_tp0
-            epoch = int(step_tp0[0, 2].item())
-            log_every = 1024
-            over_budget = int(step_tp0[:, 9].max().item())
-            if torch.distributed.get_rank(group=group) == 0 and (
-                over_budget or (log_every > 0 and epoch % log_every == 0)
+            # Observability only: keep at debug to avoid info-level spam when
+            # pd_over_budget is frequently set (would otherwise log every step).
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and torch.distributed.get_rank(group=group) == 0
             ):
+                epoch = int(step_tp0[0, 2].item())
+                log_every = 1024
+                over_budget = int(step_tp0[:, 9].max().item())
+                if over_budget or (log_every > 0 and epoch % log_every == 0):
 
-                def _minmax(col: int) -> tuple[int, int]:
-                    return (
-                        int(step_tp0[:, col].min().item()),
-                        int(step_tp0[:, col].max().item()),
+                    def _minmax(col: int) -> tuple[int, int]:
+                        return (
+                            int(step_tp0[:, col].min().item()),
+                            int(step_tp0[:, col].max().item()),
+                        )
+
+                    logger.debug(
+                        "DP Decode StepInfo epoch=%s transfer=%s prealloc=%s "
+                        "retracted=%s running=%s paused=%s pd_ms=%s "
+                        "over_budget=%s",
+                        epoch,
+                        _minmax(3),
+                        _minmax(4),
+                        _minmax(5),
+                        _minmax(6),
+                        _minmax(7),
+                        _minmax(8),
+                        _minmax(9),
                     )
-
-                logger.info(
-                    "DP Decode StepInfo epoch=%s transfer=%s prealloc=%s "
-                    "retracted=%s running=%s paused=%s pd_ms=%s "
-                    "over_budget=%s",
-                    epoch,
-                    _minmax(3),
-                    _minmax(4),
-                    _minmax(5),
-                    _minmax(6),
-                    _minmax(7),
-                    _minmax(8),
-                    _minmax(9),
-                )
 
         if _ENABLE_METRICS_DP_ATTENTION:
             self.dp_cooperation_info = DPCooperationInfo.create(
