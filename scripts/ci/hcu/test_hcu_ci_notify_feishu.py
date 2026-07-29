@@ -423,6 +423,27 @@ class ResultCollectionTest(unittest.TestCase):
 
 
 class SharedResultPublisherTest(unittest.TestCase):
+    def test_existing_shared_directory_does_not_require_ownership(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_root = Path(tmpdir)
+            with mock.patch.object(
+                Path,
+                "chmod",
+                side_effect=PermissionError("not the directory owner"),
+            ) as chmod:
+                publisher._ensure_directory(shared_root)
+            chmod.assert_not_called()
+
+    def test_existing_shared_directory_must_be_writable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_root = Path(tmpdir)
+            with mock.patch.object(publisher.os, "access", return_value=False):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "shared result directory is not writable",
+                ):
+                    publisher._ensure_directory(shared_root)
+
     def test_publishes_partition_atomically_with_group_permissions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
