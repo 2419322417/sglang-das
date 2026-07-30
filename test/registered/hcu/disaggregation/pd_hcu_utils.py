@@ -17,6 +17,16 @@ from sglang.test.test_utils import (
     popen_launch_pd_server,
 )
 
+from sglang.test.ci.ci_register import register_hcu_ci
+
+
+register_hcu_ci(
+    est_time=1,
+    suite="nightly-hcu",
+    nightly=True,
+    disabled="Support module only; covered by test_pd_hcu_utils.py.",
+)
+
 
 DEFAULT_HCU_PD_MODEL = (
     "/public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct"
