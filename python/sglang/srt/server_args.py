@@ -147,6 +147,7 @@ QUANTIZATION_CHOICES = [
     "mlx_q4",  # 4 bits, group_size=64 (mlx-community default)
     "mlx_q8",  # 8 bits, group_size=64
     "unquant",
+    "slimquant_w4a8",
     "slimquant_w4a8_marlin",
     "slimquant_marlin",
 ]
