@@ -511,13 +511,26 @@ class Glm4MoeSparseMoeBlock(nn.Module):
                     # For compressed-tensors ptpc model, don't need to check the weight_block_size
                     pass
                 else:
-                    assert (
-                        self.shared_experts.gate_up_proj.quant_method.quant_config.weight_block_size
-                        == self.shared_experts.down_proj.quant_method.quant_config.weight_block_size
+                    gate_up_quant_config = getattr(
+                        self.shared_experts.gate_up_proj.quant_method,
+                        "quant_config",
+                        None,
                     )
-                    self.shared_experts_weight_block_size = (
-                        self.shared_experts.gate_up_proj.quant_method.quant_config.weight_block_size
+                    down_proj_quant_config = getattr(
+                        self.shared_experts.down_proj.quant_method,
+                        "quant_config",
+                        None,
                     )
+                    if (
+                        gate_up_quant_config is not None
+                        or down_proj_quant_config is not None
+                    ):
+                        assert getattr(
+                            gate_up_quant_config, "weight_block_size", None
+                        ) == getattr(down_proj_quant_config, "weight_block_size", None)
+                        self.shared_experts_weight_block_size = getattr(
+                            gate_up_quant_config, "weight_block_size", None
+                        )
 
         self.top_k = config.num_experts_per_tok
 
@@ -635,7 +648,9 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
-        if not _is_cuda and not _use_aiter:
+        # HCU's Triton MoE fallback applies routed_scaling_factor in
+        # moe_sum_reduce_triton; applying it again here would yield factor^2.
+        if not _is_cuda and not _is_hcu and not _use_aiter:
             final_hidden_states *= self.routed_scaling_factor
         if shared_output is not None:
             with use_symmetric_memory(
