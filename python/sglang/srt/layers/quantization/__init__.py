@@ -50,6 +50,7 @@ from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
 from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
+from sglang.srt.layers.quantization.slimquant_w4a8 import SlimQuantW4A8Int8Config
 from sglang.srt.layers.quantization.slimquant_w4a8_marlin import SlimQuantW4A8Int8MarlinConfig
 from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_marlin import SlimQuantCompressedTensorsMarlinConfig
 from sglang.srt.utils import (
@@ -93,6 +94,7 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "auto-round": AutoRoundConfig,
     "modelslim": ModelSlimConfig,
     "quark_int4fp8_moe": QuarkInt4Fp8Config,
+    "slimquant_w4a8": SlimQuantW4A8Int8Config,
     "slimquant_w4a8_marlin": SlimQuantW4A8Int8MarlinConfig,
     "slimquant_marlin": SlimQuantCompressedTensorsMarlinConfig,
 }

@@ -964,6 +964,10 @@ class EagleDraftExtendInput(SpecInput):
     num_tokens_per_req: int = -1
     num_tokens_for_logprob_per_req: int = 1
 
+    use_sglang_create_extend_after_decode_spec_info = get_bool_env_var(
+        "SGLANG_CREATE_EXTEND_AFTER_DECODE_SPEC_INFO", default="true"
+    )
+
     def __post_init__(self):
         super().__init__(SpecInputType.EAGLE_DRAFT_EXTEND)
 
@@ -1051,19 +1055,20 @@ class EagleDraftExtendInput(SpecInput):
 
         self.capture_hidden_mode = CaptureHiddenMode.LAST
         self.positions = torch.empty_like(batch.input_ids, dtype=torch.long)
-        self.verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
+        self.bonus_tokens = torch.empty_like(
+            self.num_accept_tokens, dtype=torch.int32
+        )
         if self.use_sglang_create_extend_after_decode_spec_info:
             hcu_create_extend_after_decode_spec_info(
                 verified_id = batch.input_ids,
                 seq_lens = batch.seq_lens,
-                accept_lens = self.accept_length,
+                accept_lens = self.num_accept_tokens,
                 positions = self.positions,
-                new_verified_id = self.verified_id,
+                new_verified_id = self.bonus_tokens,
                 # bs = max(speculative_num_steps + 1, len(batch.seq_lens)),
                 bs =len(batch.seq_lens),
             )
         else:
-            self.bonus_tokens = torch.empty_like(self.num_accept_tokens, dtype=torch.int32)
             create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
                 batch.input_ids,
                 batch.seq_lens,
