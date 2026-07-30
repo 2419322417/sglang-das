@@ -81,9 +81,6 @@ _is_hcu = is_hcu()
 _use_fused_hunyuan_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 # Same env as DeepSeek: aiter MoE applies routed_scaling_factor internally.
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and is_hip()
-# lightop moe_fused_gate bakes routed_scaling_factor into topk_weights when
-# apply_routed_scaling_factor_on_output is False.
-_use_lightop = get_bool_env_var("SGLANG_USE_LIGHTOP")
 
 if _is_hcu:
     from lightop.attention import rms_rotary_embedding_fuse_with_kv_store
@@ -257,18 +254,17 @@ class HYV3MoEFused(nn.Module):
     ) -> torch.Tensor:
         """Combine routed MoE output with shared MLP; apply router_scaling_factor once.
 
-        Post-multiply only when TopK left renormalized probabilities (sum≈1).
-        Skip when scaling was already applied upstream:
-        - ``should_fuse_routed_scaling_factor_in_topk``: baked into topk_weights
-        - ``SGLANG_USE_LIGHTOP``: lightop ``moe_fused_gate`` bakes rsf into weights
-        - ``SGLANG_USE_AITER``: same guard as DeepSeek (aiter MoE applies rsf)
-
-        This keeps the fix Hy3-local and avoids double-scaling on lightop/aiter.
+        When ``should_fuse_routed_scaling_factor_in_topk`` / TopK
+        ``apply_routed_scaling_factor_on_output`` is False, TopK (including
+        lightop after 049f5e) leaves renormalized probabilities and scaling
+        must happen here — same contract as DeepSeek/Bailing. Skip only when
+        aiter MoE already applies rsf internally.
         """
+        # Do NOT skip on SGLANG_USE_LIGHTOP: after topk.py passes
+        # apply_routed_scaling_factor_on_output through to moe_fused_gate,
+        # lightop no longer bakes rsf when apply is False (Hy3 W8A8+triton).
         scale_already_applied = (
-            self.experts.should_fuse_routed_scaling_factor_in_topk
-            or _use_lightop
-            or _use_aiter
+            self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter
         )
         if scale_already_applied:
             if shared_output is not None:
