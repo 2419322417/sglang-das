@@ -12,55 +12,165 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Dict, List, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 import torch
-from sglang.srt.layers.linear import set_weight_attrs
-from sglang.srt.distributed import get_tensor_model_parallel_world_size
+import torch.nn.functional as F
+import triton.language as tl
+from lightop import gemm_ops as quant_tools
+from lightop._lmslim_native.vllm_compat.fused_moe_cache import get_moe_cache
+from lightop.quant import per_token_quant_int8
+from lmslim.layers.fused_moe import fuse_moe_w4a8 as w4a8_triton
 from torch.nn.parameter import Parameter
-from sglang.srt.layers.linear import LinearBase
-from sglang.srt.layers.quantization.base_config import LinearMethodBase, QuantizationConfig, QuantizeMethodBase, FusedMoEMethodBase
+
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
+from sglang.srt.layers.linear import LinearBase, set_weight_attrs
+from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.parameter import (
     ChannelQuantScaleParameter,
-    _ColumnvLLMParameter,
     RowvLLMParameter,
+    _ColumnvLLMParameter,
 )
-from lightop.quant import (
-    per_token_group_quant_int8,
-    per_token_quant_int8)
-from lightop import gemm_ops as quant_tools
+from sglang.srt.layers.quantization.base_config import (
+    FusedMoEMethodBase,
+    LinearMethodBase,
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
 from sglang.srt.layers.quantization.compressed_tensors import quant_ops
-from sglang.srt.utils import W8a8GetCacheJSON
-from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+from sglang.srt.utils import W8a8GetCacheJSON, get_bool_env_var
 
-import os
-from sglang.srt.utils import get_bool_env_var
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _use_fused_silu_mul_quant = get_bool_env_var("SGLANG_USE_FUSED_SILU_MUL_QUANT")
+
 
 class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
     Parameter class for linear layer weights. Uses both column and
     row parallelism.
     """
+
     pass
 
-W8A8_TRITONJSON=W8a8GetCacheJSON()
 
-def baseline_scaled_mm(a: torch.Tensor,
-                      b: torch.Tensor,
-                      scale_a: torch.Tensor,
-                      scale_b: torch.Tensor,
-                      out_dtype: torch.dtype,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+W8A8_TRITONJSON = W8a8GetCacheJSON()
 
-    scales= scale_a* scale_b.T
-    gemmout= torch.mm(
-        a.to(dtype=torch.float32), b.to(dtype=torch.float32))
-    output = (scales *gemmout).to(out_dtype)
+
+def baseline_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+
+    scales = scale_a * scale_b.T
+    gemmout = torch.mm(a.to(dtype=torch.float32), b.to(dtype=torch.float32))
+    output = (scales * gemmout).to(out_dtype)
     if bias is not None:
         output = output + bias
     return output.to(out_dtype)
+
+
+def fused_experts_impl_w4a8_triton(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    cache13: torch.Tensor,
+    *,
+    activation: str,
+    apply_router_weight_on_input: bool,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    routed_scaling_factor: float,
+    shared_output: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Run SlimQuant W4A8 Triton GEMMs without whole-layer LightOp fusion."""
+    assert hidden_states.ndim == 2 and hidden_states.is_contiguous()
+    assert hidden_states.shape[1] == w1.shape[2] * 2
+    assert topk_weights.shape == topk_ids.shape
+
+    num_tokens = hidden_states.shape[0]
+    if num_tokens == 0:
+        return torch.empty_like(hidden_states)
+    top_k = topk_ids.shape[1]
+    n1 = w1.shape[1]
+    n2 = w2.shape[1]
+    chunk_size = min(int(os.getenv("LMSLIM_FUSED_MOE_CHUNK_SIZE", "32768")), num_tokens)
+    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    output = torch.empty_like(hidden_states)
+
+    for begin in range(0, num_tokens, chunk_size):
+        end = min(begin + chunk_size, num_tokens)
+        token_count = end - begin
+        current_x = hidden_states[begin:end]
+        current_ids = topk_ids[begin:end]
+        current_weights = topk_weights[begin:end]
+        cache1 = cache13[: token_count * top_k * n1].view(token_count, top_k, n1)
+        cache3 = cache13[: token_count * top_k * n2].view(token_count, top_k, n2)
+
+        config1, config2 = w4a8_triton.get_w8a8moe_json(
+            token_count, w1.shape[0], n1, n2, n1 // 2
+        )
+        sorted_ids, expert_ids, padded_count = w4a8_triton.moe_align_block_size(
+            current_ids, config1["BLOCK_SIZE_M"], global_num_experts, expert_map
+        )
+        qx, x_scale = per_token_quant_int8(current_x)
+        w4a8_triton.invoke_fused_moe_kernel_w4a8(
+            qx,
+            w1,
+            cache1,
+            x_scale,
+            w1_scale,
+            None,
+            current_weights,
+            sorted_ids,
+            expert_ids,
+            padded_count,
+            apply_router_weight_on_input,
+            top_k,
+            config1,
+            compute_type=compute_type,
+        )
+
+        gate, up = cache1.chunk(2, dim=-1)
+        if activation == "silu":
+            activated = F.silu(gate) * up
+        elif activation == "gelu":
+            activated = F.gelu(gate) * up
+        else:
+            raise ValueError(f"Unsupported FusedMoE activation: {activation}")
+        qactivated, activated_scale = per_token_quant_int8(
+            activated.reshape(token_count * top_k, n1 // 2)
+        )
+        w4a8_triton.invoke_fused_moe_kernel_w4a8(
+            qactivated,
+            w2,
+            cache3,
+            activated_scale,
+            w2_scale,
+            None,
+            current_weights,
+            sorted_ids,
+            expert_ids,
+            padded_count,
+            not apply_router_weight_on_input,
+            1,
+            config2,
+            compute_type=compute_type,
+        )
+        reduced = cache3.sum(dim=1).mul_(routed_scaling_factor)
+        if shared_output is not None:
+            reduced.add_(shared_output[begin:end])
+        output[begin:end].copy_(reduced)
+
+    return output
 
 
 class SlimQuantW4A8Int8Config(QuantizationConfig):
@@ -98,7 +208,9 @@ class SlimQuantW4A8Int8Config(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from sglang.srt.layers.moe.fused_moe_triton import (FusedMoE, FusedMoeWeightScaleSupported)
+        from sglang.srt.layers.moe.fused_moe_triton import (
+            FusedMoE,
+        )
 
         if isinstance(layer, LinearBase):
             return SlimQuantW4A8Int8LinearMethod(self)
@@ -114,32 +226,41 @@ class SlimQuantW4A8Int8LinearMethod(LinearMethodBase):
 
     def __init__(self, quantization_config: SlimQuantW4A8Int8Config):
         self.quantization_config = quantization_config
-        self.tritonsingleton= W8a8GetCacheJSON()
-        self.w8a8_strategy=int(os.getenv('W8A8_SUPPORT_METHODS', '1'))
-        
+        self.tritonsingleton = W8a8GetCacheJSON()
+        self.w8a8_strategy = int(os.getenv("W8A8_SUPPORT_METHODS", "1"))
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        n=layer.weight.shape[0]
-        k=layer.weight.shape[1]
-        
-        if self.w8a8_strategy==1:
-            if {n,k} not in self.tritonsingleton.weight_shapes:
-                self.tritonsingleton.weight_shapes.append({n,k})
-                json_file=self.tritonsingleton.get_w8a8json_name(n,k)
-                configs_dict=self.tritonsingleton.get_triton_cache(json_file,n,k)
-                
+        n = layer.weight.shape[0]
+        k = layer.weight.shape[1]
+
+        if self.w8a8_strategy == 1:
+            if {n, k} not in self.tritonsingleton.weight_shapes:
+                self.tritonsingleton.weight_shapes.append({n, k})
+                json_file = self.tritonsingleton.get_w8a8json_name(n, k)
+                configs_dict = self.tritonsingleton.get_triton_cache(json_file, n, k)
+
                 if configs_dict:
                     self.tritonsingleton.triton_json_dict.update(configs_dict)
-                    
+
                     for key, value in configs_dict.items():
-                        m=int(key.split('_')[0])
-                        quant_tools.triton_int8_gemm_helper(m=m,n=n,k=k,per_token_act_quant=True,per_out_channel_weight_quant=True,use_bias=False,device=layer.weight.device,best_config=value)
-        elif self.w8a8_strategy==3:
+                        m = int(key.split("_")[0])
+                        quant_tools.triton_int8_gemm_helper(
+                            m=m,
+                            n=n,
+                            k=k,
+                            per_token_act_quant=True,
+                            per_out_channel_weight_quant=True,
+                            use_bias=False,
+                            device=layer.weight.device,
+                            best_config=value,
+                        )
+        elif self.w8a8_strategy == 3:
             layer.weight.data = layer.weight.data.T
-        else: 
-            weight_data=layer.weight.data
-            _weight=weight_data.T.contiguous().reshape(n,-1)
-            layer.weight.data=_weight
-            
+        else:
+            weight_data = layer.weight.data
+            _weight = weight_data.T.contiguous().reshape(n, -1)
+            layer.weight.data = _weight
+
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -180,7 +301,7 @@ class SlimQuantW4A8Int8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         input_quant_args: Optional[list[torch.Tensor]] = None,
-        silu_quant_args: Optional[list[torch.Tensor]] = None
+        silu_quant_args: Optional[list[torch.Tensor]] = None,
     ):
         if _use_fused_rms_quant and input_quant_args is not None:
             assert len(input_quant_args) == 2
@@ -190,73 +311,83 @@ class SlimQuantW4A8Int8LinearMethod(LinearMethodBase):
         else:
             x_q, x_scale = per_token_quant_int8(x)
 
-        if self.w8a8_strategy==1:
-            m=x_q.shape[0]
-            k=x_q.shape[1]
-            n=layer.weight.shape[1]
-            
-            if len(W8A8_TRITONJSON.triton_json_dict)==0:
-                best_config=None
-                
-            elif f"1_{n}_{k}" in  W8A8_TRITONJSON.triton_json_dict:
-                if m<=16:
-                    m_=m
-                elif m<=64:
-                    m_= (m + 3) & -4 #取值到最近的4的倍数
-                elif m<=160:
-                    m_=(m + 7) & -8
-                    
-                elif m<200: #256
-                    m_=160
-                elif m<480: #512
-                    m_=256
-                elif m<960: #1024
-                    m_=512
-                elif m<2048:
-                    m_=1024
-                elif m<4096:
-                    m_=2048
-                elif m<6000:
-                    m_=4096
-                else:
-                    m_=8192  
+        if self.w8a8_strategy == 1:
+            m = x_q.shape[0]
+            k = x_q.shape[1]
+            n = layer.weight.shape[1]
 
-                best_config=W8A8_TRITONJSON.triton_json_dict[f"{m_}_{n}_{k}"]
-                
-            else: 
-                best_config=None
-                
-            #if best_config==None:
+            if len(W8A8_TRITONJSON.triton_json_dict) == 0:
+                best_config = None
+
+            elif f"1_{n}_{k}" in W8A8_TRITONJSON.triton_json_dict:
+                if m <= 16:
+                    m_ = m
+                elif m <= 64:
+                    m_ = (m + 3) & -4  # 取值到最近的4的倍数
+                elif m <= 160:
+                    m_ = (m + 7) & -8
+
+                elif m < 200:  # 256
+                    m_ = 160
+                elif m < 480:  # 512
+                    m_ = 256
+                elif m < 960:  # 1024
+                    m_ = 512
+                elif m < 2048:
+                    m_ = 1024
+                elif m < 4096:
+                    m_ = 2048
+                elif m < 6000:
+                    m_ = 4096
+                else:
+                    m_ = 8192
+
+                best_config = W8A8_TRITONJSON.triton_json_dict[f"{m_}_{n}_{k}"]
+
+            else:
+                best_config = None
+
+            # if best_config==None:
             #    print("m:{},n:{},k:{}".format(m,n,k))
             #    print("config not found!")
 
-            return quant_ops.triton_scaled_mm(x_q,
-                                        layer.weight,
-                                        scale_a=x_scale,
-                                        scale_b=layer.weight_scale,
-                                        out_dtype=x.dtype,
-                                        bias=bias,best_config=best_config)
-        elif self.w8a8_strategy==2:
-            return quant_ops.cutlass_scaled_mm(x_q,
-                                        layer.weight,
-                                        scale_a=x_scale,
-                                        scale_b=layer.weight_scale,
-                                        out_dtype=x.dtype,
-                                        bias=bias)
-        elif self.w8a8_strategy==3:
-            return quant_ops.blaslt_scaled_mm(x_q,
-                                    layer.weight,
-                                    scale_a=x_scale,
-                                    scale_b=layer.weight_scale,
-                                    out_dtype=x.dtype,
-                                    bias=None)
+            output = quant_ops.triton_scaled_mm(
+                x_q,
+                layer.weight,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=bias,
+                best_config=best_config,
+            )
+            return output
+        elif self.w8a8_strategy == 2:
+            return quant_ops.cutlass_scaled_mm(
+                x_q,
+                layer.weight,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=bias,
+            )
+        elif self.w8a8_strategy == 3:
+            return quant_ops.blaslt_scaled_mm(
+                x_q,
+                layer.weight,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=None,
+            )
         else:
-            return quant_ops.rocblas_scaled_mm(x_q,
-                                        layer.weight,
-                                        scale_a=x_scale,
-                                        scale_b=layer.weight_scale,
-                                        out_dtype=x.dtype,
-                                        bias=bias) 
+            return quant_ops.rocblas_scaled_mm(
+                x_q,
+                layer.weight,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                out_dtype=x.dtype,
+                bias=bias,
+            )
 
 
 class SlimQuantW4A8Int8MoEMethod:
@@ -271,7 +402,6 @@ class SlimQuantW4A8Int8MoEMethod:
     """
 
     def __new__(cls, *args, **kwargs):
-        from sglang.srt.layers.moe.fused_moe_triton import (FusedMoE, FusedMoeWeightScaleSupported)
 
         if not hasattr(cls, "_initialized"):
             original_init = cls.__init__
@@ -290,24 +420,28 @@ class SlimQuantW4A8Int8MoEMethod:
 
     def __init__(self, quant_config):
         self.quant_config = quant_config
-        self.tritonsingleton= W8a8GetCacheJSON()
+        self.tritonsingleton = W8a8GetCacheJSON()
 
     def create_weights(
         self,
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        from sglang.srt.layers.moe.fused_moe_triton import (FusedMoE, FusedMoeWeightScaleSupported)
+        from sglang.srt.layers.moe.fused_moe_triton import (
+            FusedMoeWeightScaleSupported,
+        )
+
         tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size = intermediate_size_per_partition
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
-                num_experts, 2 * intermediate_size, hidden_size//2, dtype=torch.int8
+                num_experts, 2 * intermediate_size, hidden_size // 2, dtype=torch.int8
             ),
             requires_grad=False,
         )
@@ -315,7 +449,9 @@ class SlimQuantW4A8Int8MoEMethod:
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(num_experts, hidden_size, intermediate_size//2, dtype=torch.int8),
+            torch.empty(
+                num_experts, hidden_size, intermediate_size // 2, dtype=torch.int8
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
@@ -346,19 +482,23 @@ class SlimQuantW4A8Int8MoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        E=layer.w13_weight.shape[0]
-        N1=layer.w13_weight.shape[1]
-        N2=layer.w2_weight.shape[1]
-        K=N1//2
-        if [E,N1,N2,K] not in self.tritonsingleton.moe_weight_shapes:
-            self.tritonsingleton.moe_weight_shapes.append([E,N1,N2,K])
-            
-        TOPK= self.tritonsingleton.topk
+        E = layer.w13_weight.shape[0]
+        N1 = layer.w13_weight.shape[1]
+        N2 = layer.w2_weight.shape[1]
+        K = N1 // 2
+        if [E, N1, N2, K] not in self.tritonsingleton.moe_weight_shapes:
+            self.tritonsingleton.moe_weight_shapes.append([E, N1, N2, K])
 
-        json_file=self.tritonsingleton.get_moeint8json_name(E,N1,N2,K,TOPK,use_int4_w4a8=True)
-        configs_dict=self.tritonsingleton.get_moeint8_triton_cache(json_file,E,N1,N2,K,TOPK)
-        
-        #warmup
+        TOPK = self.tritonsingleton.topk
+
+        json_file = self.tritonsingleton.get_moeint8json_name(
+            E, N1, N2, K, TOPK, use_int4_w4a8=True
+        )
+        configs_dict = self.tritonsingleton.get_moeint8_triton_cache(
+            json_file, E, N1, N2, K, TOPK
+        )
+
+        # warmup
         if configs_dict:
             self.tritonsingleton.triton_moejson_dict.update(configs_dict)
 
@@ -377,66 +517,80 @@ class SlimQuantW4A8Int8MoEMethod:
         self.moe_runner_config = moe_runner_config
         self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
-    def apply(
+    def _apply_triton(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        use_nn_moe: Optional[bool] = False,
-        routed_scaling_factor: Optional[float] = None,
-        use_fused_gate: Optional[bool] = False,
-        **_  
+        topk_output,
+        activation: str,
+        shared_output: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton import (FusedMoE, FusedMoeWeightScaleSupported)
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `SlimQuantW4A8Int8MoEMethod` yet.")   
-        # Expert selection
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-            use_fused_gate=use_fused_gate
-        )
+        from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
 
-        return fused_experts(
+        topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
+        x, topk_weights = apply_topk_weights_cpu(
+            self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
+        )
+        cache13 = get_moe_cache(
+            topk_ids.shape[1],
+            layer.w13_weight.shape[1],
+            layer.w2_weight.shape[1],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        routed_scaling_factor = (
+            self.moe_runner_config.routed_scaling_factor
+            if self.moe_runner_config.routed_scaling_factor is not None
+            else 1.0
+        )
+        output = fused_experts_impl_w4a8_triton(
             x,
             layer.w13_weight,
             layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            use_int4_w4a8=True,
-            per_channel_quant=True,
+            topk_weights,
+            topk_ids,
+            cache13,
             activation=activation,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            w1_scale=(layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            use_nn_moe=use_nn_moe,
+            apply_router_weight_on_input=self.moe_runner_config.apply_router_weight_on_input,
+            global_num_experts=self.moe_runner_config.num_experts,
+            expert_map=getattr(layer, "expert_map", None),
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            routed_scaling_factor=routed_scaling_factor,
+            shared_output=shared_output,
+        )
+        return output
+
+    @torch._dynamo.disable()
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
+    ):
+        from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
+
+        output = self._apply_triton(
+            layer,
+            dispatch_output.hidden_states,
+            dispatch_output.topk_output,
+            layer.moe_runner_config.activation,
+            shared_output=None,
+        )
+        return StandardCombineInput(hidden_states=output)
+
+    @torch._dynamo.disable()
+    def apply_with_shared_output(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        activation: str = "silu",
+        shared_output: Optional[torch.Tensor] = None,
+        topk_output=None,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self._apply_triton(
+            layer, x, topk_output, activation, shared_output=shared_output
         )
