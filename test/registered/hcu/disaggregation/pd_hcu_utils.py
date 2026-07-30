@@ -7,6 +7,7 @@ import os
 import unittest
 from pathlib import Path
 
+from sglang.test.ci.ci_register import register_hcu_ci
 from sglang.test.hcu_utils import assert_generate_non_empty
 from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
@@ -16,9 +17,6 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     popen_launch_pd_server,
 )
-
-from sglang.test.ci.ci_register import register_hcu_ci
-
 
 register_hcu_ci(
     est_time=1,
@@ -41,14 +39,10 @@ BACKEND_MODULES = {
 
 def parse_backend_names(value: str | None = None) -> list[str]:
     raw = (
-        os.environ.get("SGLANG_HCU_PD_BACKENDS", "mooncake")
-        if value is None
-        else value
+        os.environ.get("SGLANG_HCU_PD_BACKENDS", "mooncake") if value is None else value
     )
     names = list(
-        dict.fromkeys(
-            item.strip().lower() for item in raw.split(",") if item.strip()
-        )
+        dict.fromkeys(item.strip().lower() for item in raw.split(",") if item.strip())
     )
     unknown = [name for name in names if name not in BACKEND_MODULES]
     if unknown:
