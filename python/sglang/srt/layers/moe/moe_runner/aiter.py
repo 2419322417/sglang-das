@@ -378,7 +378,7 @@ def _get_aiter_w8a8_weights_for_solution(
     layer = quant_info.layer
 
     with torch.no_grad():
-        w1_moe_c = moe_layout_shuffle_gemm1(quant_info.w13_weight).view(
+        w1_moe_c = moe_layout_shuffle_gemm2(quant_info.w13_weight).view(
             *quant_info.w13_weight.shape
         )
         w2_moe_c = moe_layout_shuffle_gemm2(quant_info.w2_weight).view(
@@ -460,6 +460,7 @@ def _run_aiter_w8a8(
         gemm1_alpha=runner_config.gemm1_alpha,
         gemm1_limit=runner_config.gemm1_clamp_limit,
     )
+
     return AiterRunnerOutput(hidden_states=output)
 
 
