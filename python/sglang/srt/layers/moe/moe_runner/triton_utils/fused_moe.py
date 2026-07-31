@@ -488,7 +488,7 @@ def _shape_str(tensor: Optional[torch.Tensor]) -> str:
     return "None" if tensor is None else str(tuple(tensor.shape))
 
 
-def _should_force_aiter_w4a16_moec(quant_type: Optional["MoeQuantType"]) -> bool:
+def _should_force_aiter_w4a16_moec(quant_type: Optional[MoeQuantType]) -> bool:
     if quant_type != MoeQuantType.W4A16:
         return False
 
@@ -621,9 +621,9 @@ def fused_experts_impl_aiter(
     force_w4a16_moec = _should_force_aiter_w4a16_moec(quant_type)
     status, moe_cfg = _get_aiter_moe_config_w4a16(config_kwargs, force_w4a16_moec)
     if status:
-        assert moe_cfg.solution_type is not None, (
-            "status=True but solution_type is None"
-        )
+        assert (
+            moe_cfg.solution_type is not None
+        ), "status=True but solution_type is None"
         assert moe_cfg.config is not None, "status=True but config is None"
         assert moe_cfg.solution_type in (
             MoeSolutionType.MOE_C,
@@ -641,9 +641,9 @@ def fused_experts_impl_aiter(
         #     f"config keys={list(moe_cfg.config.keys())}"
         # )
     else:
-        assert moe_cfg.solution_type is None, (
-            "status=False but solution_type is not None"
-        )
+        assert (
+            moe_cfg.solution_type is None
+        ), "status=False but solution_type is not None"
         assert moe_cfg.config is None, "status=False but config is not None"
         print(
             f"[get_config_aiter_moe] M={M}, K={K}, N1={N1}, N2={N2}, E={E}, top_k={topk_ids.shape[1]}, block_size={block_size}, dtype={hidden_states.dtype}, quant_type={quant_type} "
@@ -912,9 +912,9 @@ def _fused_moe_kernel_sequence(
                 if filter_expert:
                     swiglu_limit_for_triton = swiglu_limit
                 else:
-                    assert _is_cuda, (
-                        "fused silu_and_mul_clamp kernel is CUDA-only; HIP must disable SWIGLU_CLAMP_FUSION"
-                    )
+                    assert (
+                        _is_cuda
+                    ), "fused silu_and_mul_clamp kernel is CUDA-only; HIP must disable SWIGLU_CLAMP_FUSION"
                     swiglu_limit_for_silu_and_mul_clamp = swiglu_limit
             else:
                 half = N // 2
@@ -1214,9 +1214,9 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.shape[1] // 2 == w1.shape[2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[1] == w1.shape[2] - padded_size, (
-            f"Hidden size mismatch"
-        )
+        assert (
+            hidden_states.shape[1] == w1.shape[2] - padded_size
+        ), f"Hidden size mismatch"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"

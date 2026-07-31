@@ -16,17 +16,26 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union
-from sglang.srt.distributed import (
-    get_moe_expert_parallel_rank,
-    get_moe_expert_parallel_world_size,
-)
+
 import torch
 import torch.nn.functional as F
 
-from sglang.jit_kernel.activation import silu_and_mul
+from sglang.kernels.ops.moe.ep_moe_kernels import (
+    build_m_indices_triton,
+    ep_gather,
+    ep_scatter,
+    ep_scatter_no_scale,
+    tma_align_input_scale,
+)
+from sglang.kernels.ops.moe.rocm_moe_utils import upscale, upscale_mxfp4
 from sglang.kernels.ops.quantization.fp8_kernel import (
     is_fp8_fnuz,
     sglang_per_token_group_quant_fp8,
+)
+from sglang.srt.batch_overlap.single_batch_overlap import DownGemmOverlapArgs
+from sglang.srt.distributed import (
+    get_moe_expert_parallel_rank,
+    get_moe_expert_parallel_world_size,
 )
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.utils import FusedMoEMode, npu_format_cast
@@ -36,18 +45,10 @@ from sglang.srt.layers.moe import (  # should_use_flashinfer_trtllm_moe, # æ‰¾ä¸
     get_moe_a2a_backend,
     get_moe_runner_backend,
 )
-from sglang.kernels.ops.moe.ep_moe_kernels import (
-    ep_gather,
-    ep_scatter,
-    ep_scatter_no_scale,
-    tma_align_input_scale,
-    build_m_indices_triton,
-)
 from sglang.srt.layers.moe.fused_moe_triton.layer import (
     FusedMoE,
     moe_forward_piecewise_cuda_graph_impl,
 )
-from sglang.kernels.ops.moe.rocm_moe_utils import upscale, upscale_mxfp4
 from sglang.srt.layers.moe.moe_runner.deep_gemm import copy_list_to_gpu_no_ce
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
     DeepEPLLCombineInput,
@@ -75,7 +76,6 @@ from sglang.srt.layers.quantization.slimquant_w4a8_marlin import (
     SlimQuantW4A8Int8MarlinConfig,
 )
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
-from sglang.srt.batch_overlap.single_batch_overlap import DownGemmOverlapArgs
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
@@ -533,9 +533,9 @@ class DeepEPMoE(FusedMoE):
             and not _is_npu
             and not _is_hip
         ):
-            assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM, (
-                "Unquantized DeepEP low-latency MoE requires DeepGEMM BF16"
-            )
+            assert (
+                deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            ), "Unquantized DeepEP low-latency MoE requires DeepGEMM BF16"
             self.deprecate_flag = True
         else:
             self.deprecate_flag = False
@@ -658,9 +658,9 @@ class DeepEPMoE(FusedMoE):
         i_s: Optional[torch.Tensor] = None,
     ):
         if is_in_tc_piecewise_cuda_graph():
-            assert TopKOutputChecker.format_is_standard(topk_output), (
-                "Only standard topk output is supported for piecewise cuda graph"
-            )
+            assert TopKOutputChecker.format_is_standard(
+                topk_output
+            ), "Only standard topk output is supported for piecewise cuda graph"
             return moe_forward_piecewise_cuda_graph_impl(
                 hidden_states,
                 topk_output.topk_weights,

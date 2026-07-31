@@ -448,8 +448,7 @@ def build_card(
         )
     elif color == "orange":
         conclusion = (
-            f"已完成的 {completed_count} 个模型全部达到阈值，"
-            "本次结果状态不完整。"
+            f"已完成的 {completed_count} 个模型全部达到阈值，" "本次结果状态不完整。"
         )
     else:
         conclusion = f"本次 {completed_count} 个模型全部达到阈值。"

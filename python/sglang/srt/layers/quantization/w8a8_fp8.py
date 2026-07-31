@@ -66,6 +66,7 @@ def _is_moe_prefill_or_normal() -> bool:
         or server_args.deepep_mode == "normal"
     )
 
+
 try:
     from lightop.moe import (  # noqa: F401
         fused_experts_impl_w4a8_marlin,

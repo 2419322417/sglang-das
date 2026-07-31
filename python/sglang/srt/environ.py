@@ -601,7 +601,6 @@ class Envs:
     SGLANG_USE_FUSED_RESHAPE_TO_FLOAT = EnvBool(False)
     SGLANG_USE_AITER_LINEAR_ATTN = EnvBool(False)
 
-
     # MTHREADS & MUSA
     SGLANG_MUSA_FA3_FORCE_UPDATE_METADATA = EnvBool(False)
 

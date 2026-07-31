@@ -33,6 +33,12 @@ from sglang.srt.utils.common import torch_release
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
+from lmslim import quant_ops
+from lmslim.layers.gemm.fp8_utils import (
+    per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu,
+)
+from lmslim.quantize.quant_ops import BlockSize
+
 from sglang.kernels.ops.quantization.fp8_kernel import (
     fp8_dtype,
     fp8_max,
@@ -58,7 +64,6 @@ from sglang.srt.utils import (
     get_hip_version,
     is_blackwell_supported,
     is_cuda,
-    is_hcu,
     is_flashinfer_available,
     is_gfx95_supported,
     is_hcu,
@@ -71,9 +76,6 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.custom_op import register_custom_op
 
-from lmslim import quant_ops
-from lmslim.quantize.quant_ops import BlockSize
-from lmslim.layers.gemm.fp8_utils import per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu
 logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()
@@ -1008,27 +1010,28 @@ def hipblaslt_w8a8_block_fp8_linear(
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-        input_2d = input.view(-1, input.shape[-1])
-        output_shape = [*input.shape[:-1], weight.shape[1]]
-        q_input, input_scale = per_token_group_quant_fp8_hcu(
-            input_2d, block_size[1], column_major_scales=False
-        )
-        enum_block_size = BlockSize.block_128x128
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[1]]
+    q_input, input_scale = per_token_group_quant_fp8_hcu(
+        input_2d, block_size[1], column_major_scales=False
+    )
+    enum_block_size = BlockSize.block_128x128
 
-        # if hasattr(self, "block_size") and self.block_size[0] == 64:
-        #     enum_block_size = BlockSize.block_64x64
-        
-        output = hipblaslt_w8a8_block_fp8_matmul(
-            A=q_input,
-            B=weight,
-            As=input_scale,
-            Bs=weight_scale,
-            block_size=enum_block_size,
-            output_dtype=input_2d.dtype,
-        )
-        if bias is not None:
-            output += bias
-        return output.to(dtype=input_2d.dtype).view(*output_shape)
+    # if hasattr(self, "block_size") and self.block_size[0] == 64:
+    #     enum_block_size = BlockSize.block_64x64
+
+    output = hipblaslt_w8a8_block_fp8_matmul(
+        A=q_input,
+        B=weight,
+        As=input_scale,
+        Bs=weight_scale,
+        block_size=enum_block_size,
+        output_dtype=input_2d.dtype,
+    )
+    if bias is not None:
+        output += bias
+    return output.to(dtype=input_2d.dtype).view(*output_shape)
+
 
 def hipblaslt_w8a8_block_fp8_matmul(
     A: torch.Tensor,

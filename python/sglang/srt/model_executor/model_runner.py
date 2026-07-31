@@ -38,6 +38,7 @@ import torch.distributed as dist
 from torch import nn
 
 from sglang.kernels.ops.quantization.fp8_kernel import fp8_dtype
+from sglang.srt.compilation.torch_compile_decoration import set_torch_compile_config
 from sglang.srt.configs import (
     BailingHybridConfig,
     FalconH1Config,
@@ -68,7 +69,6 @@ from sglang.srt.configs.model_config import (
     is_deepseek_dsa,
 )
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
-from sglang.srt.compilation.torch_compile_decoration import set_torch_compile_config
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 from sglang.srt.debug_utils.dumper import dumper
 from sglang.srt.debug_utils.tensor_dump_forward_hook import (
@@ -3007,6 +3007,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         with forward_context(ForwardContext(attn_backend=self.attn_backend)):
             with torch.inference_mode(), run_ctx or empty_context():
                 run_once()
+
     def maybe_init_ngram_embedding(self):
         self.use_ngram_embedding = self.model_config.use_ngram_embedding
         if self.use_ngram_embedding:

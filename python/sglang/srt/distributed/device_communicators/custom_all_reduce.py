@@ -33,6 +33,7 @@ from sglang.srt.utils import (
     is_musa,
     log_info_on_rank0,
 )
+
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
 _is_hip = is_hip()
@@ -343,6 +344,7 @@ class CustomAllreduce:
 
     def __del__(self):
         self.close()
+
 
 def dispatch_custom_allreduce(
     group: ProcessGroup,

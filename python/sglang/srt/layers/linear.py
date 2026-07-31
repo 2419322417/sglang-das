@@ -56,8 +56,12 @@ _disable_hip_linear_quant = _is_hip and get_bool_env_var(
 )
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _use_fused_silu_mul_quant = get_bool_env_var("SGLANG_USE_FUSED_SILU_MUL_QUANT")
-_use_fused_bailing_silu_mul_fp8_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_SILU_MUL_FP8_QUANT")
-_use_fused_dpskv4_silu_mul_fp8_quant = get_bool_env_var("SGLANG_USE_FUSED_DPSKV4_SILU_MUL_FP8_QUANT")
+_use_fused_bailing_silu_mul_fp8_quant = get_bool_env_var(
+    "SGLANG_USE_FUSED_BAILING_SILU_MUL_FP8_QUANT"
+)
+_use_fused_dpskv4_silu_mul_fp8_quant = get_bool_env_var(
+    "SGLANG_USE_FUSED_DPSKV4_SILU_MUL_FP8_QUANT"
+)
 
 if _use_fused_rms_quant:
     try:
@@ -108,6 +112,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
 
 _is_cpu = is_cpu()
 _is_npu = is_npu()
+
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
     marlin_tile_size = getattr(param, "marlin_tile_size", None)
@@ -302,20 +307,23 @@ class ReplicatedLinear(LinearBase):
         ), f"{param.shape=} {param.dtype=} {loaded_weight.shape=} {loaded_weight.dtype=}"
         param.data.copy_(loaded_weight)
 
-    def forward(self,
-                x: torch.Tensor,
-                rms_weight: Optional[torch.Tensor] = None,
-                residual: Optional[torch.Tensor] = None,
-                quant_args: Optional[list] = None,
-                update_hd: Optional[bool] = True) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        rms_weight: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        quant_args: Optional[list] = None,
+        update_hd: Optional[bool] = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         if _use_fused_rms_quant and rms_weight is not None:
-            i_q, _scales = lm_faster_rmsquant(input=x,
-                                              rms_weight=rms_weight,
-                                              epsilon=1e-6,
-                                              quant_dtype=torch.int8,
-                                              residual=residual,
-                                              update_input=update_hd,
-                                            )
+            i_q, _scales = lm_faster_rmsquant(
+                input=x,
+                rms_weight=rms_weight,
+                epsilon=1e-6,
+                quant_dtype=torch.int8,
+                residual=residual,
+                update_input=update_hd,
+            )
 
             input_quant_args = [i_q, _scales]
 
@@ -515,26 +523,34 @@ class ColumnParallelLinear(LinearBase):
                 # Fallback for parameters that don't accept additional args
                 param.load_column_parallel_weight(loaded_weight)
 
-    def forward(self, input_,
-                rms_weight: Optional[torch.Tensor] = None,
-                residual: Optional[torch.Tensor] = None,
-                update_hd: Optional[bool] = True,
-                input_quant_args = None,
-            ):
-        if _use_fused_rms_quant and (rms_weight is not None or input_quant_args is not None):
+    def forward(
+        self,
+        input_,
+        rms_weight: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None,
+        update_hd: Optional[bool] = True,
+        input_quant_args=None,
+    ):
+        if _use_fused_rms_quant and (
+            rms_weight is not None or input_quant_args is not None
+        ):
             if input_quant_args is None:
-                i_q, _scales = lm_faster_rmsquant(input=input_,
-                                            rms_weight=rms_weight,
-                                            epsilon=self.eps,
-                                            quant_dtype=torch.int8,
-                                            residual=residual,
-                                            update_input=update_hd)
+                i_q, _scales = lm_faster_rmsquant(
+                    input=input_,
+                    rms_weight=rms_weight,
+                    epsilon=self.eps,
+                    quant_dtype=torch.int8,
+                    residual=residual,
+                    update_input=update_hd,
+                )
 
                 input_quant_args = [i_q, _scales]
 
             bias = self.bias if not self.skip_bias_add else None
             assert self.quant_method is not None
-            output_parallel = self.quant_method.apply(self, input_, bias, input_quant_args)
+            output_parallel = self.quant_method.apply(
+                self, input_, bias, input_quant_args
+            )
 
             if self.gather_output:
                 # All-gather across the partitions.
@@ -545,11 +561,11 @@ class ColumnParallelLinear(LinearBase):
             return output, output_bias
         else:
             bias = self.bias if not self.skip_bias_add else None
-            
+
             # Matrix multiply.
             assert self.quant_method is not None
             output_parallel = self.quant_method.apply(self, input_, bias)
-           
+
             if self.gather_output:
                 # All-gather across the partitions.
                 output = tensor_model_parallel_all_gather(output_parallel)
@@ -988,29 +1004,32 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             tp_size=self.tp_size,
         )
 
-
     def forward(
-        self, input_,
+        self,
+        input_,
         rms_weight: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
-        update_hd: Optional[bool] = True
+        update_hd: Optional[bool] = True,
     ):
         if _use_fused_rms_quant and rms_weight is not None:
             input_quant_args = None
             assert residual is not None and rms_weight is not None
-            i_q, _scales = lm_faster_rmsquant(input=input_,
-                                        rms_weight=rms_weight,
-                                        epsilon=self.eps,
-                                        quant_dtype=torch.int8,
-                                        residual=residual,
-                                        update_input=update_hd)
+            i_q, _scales = lm_faster_rmsquant(
+                input=input_,
+                rms_weight=rms_weight,
+                epsilon=self.eps,
+                quant_dtype=torch.int8,
+                residual=residual,
+                update_input=update_hd,
+            )
 
             input_quant_args = [i_q, _scales]
 
-
             bias = self.bias if not self.skip_bias_add else None
             assert self.quant_method is not None
-            output_parallel = self.quant_method.apply(self, input_, bias, input_quant_args)
+            output_parallel = self.quant_method.apply(
+                self, input_, bias, input_quant_args
+            )
 
             if self.gather_output:
                 # All-gather across the partitions.
@@ -1723,7 +1742,9 @@ class RowParallelLinear(LinearBase):
                     sm.tag(output_parallel)
         else:
             with symm_ctx:
-                output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+                output_parallel = self.quant_method.apply(
+                    self, input_parallel, bias=bias_
+                )
 
         # skip_all_reduce: explicit call-site override. Also honor
         # ForwardFlags (fuse_mlp_allreduce / mlp_reduce_scatter) published by

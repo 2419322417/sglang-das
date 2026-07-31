@@ -23,6 +23,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+
 from sglang.srt.layers.dp_attention import is_dp_attention_enabled
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor
@@ -270,5 +271,6 @@ class HYV3ForCausalLMNextN(nn.Module):
             num_logical_experts=config.num_experts,
             num_groups=None,
         )
+
 
 EntryClass = [HYV3ForCausalLMNextN]

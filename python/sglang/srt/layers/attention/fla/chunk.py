@@ -34,6 +34,7 @@ if is_intel:
 
 CHUNK_SIZE = 64
 
+
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,

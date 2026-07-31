@@ -281,8 +281,7 @@ void setup_kernel_smem_once(host::DebugInfo where = {}) {
   static const auto result = [] {
     const auto fptr = std::bit_cast<const void*>(f);
 #if defined(USE_ROCM)
-    return ::hipFuncSetAttribute(
-        fptr, ::hipFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSMEM);
+    return ::hipFuncSetAttribute(fptr, ::hipFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSMEM);
 #else
     return ::cudaFuncSetAttribute(fptr, ::cudaFuncAttributeMaxDynamicSharedMemorySize, kMaxDynamicSMEM);
 #endif

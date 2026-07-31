@@ -126,6 +126,7 @@ if _is_musa:
 
 logger = logging.getLogger(__name__)
 
+
 @triton.jit
 def _per_token_quant_fp8(
     x_ptr,
@@ -136,15 +137,14 @@ def _per_token_quant_fp8(
     N,
     BLOCK: tl.constexpr,
     fp8_min,
-    fp8_max
+    fp8_max,
 ):
     row_id = tl.program_id(0)
 
     cols = tl.arange(0, BLOCK)
     mask = cols < N
 
-    x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask,
-                other=0.0).to(tl.float32)
+    x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale_x = absmax / fp8_max
     x_q = tl.clamp(x / scale_x, min=fp8_min, max=fp8_max).to(xq_ptr.dtype.element_ty)
@@ -156,17 +156,15 @@ def per_token_quant_fp8(x):
     M = x.numel() // x.shape[-1]
     N = x.shape[-1]
     x_q = torch.empty_like(x, device=x.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(x.shape[:-1] + (1, ),
-                         device=x.device,
-                         dtype=torch.float32)
+    scales = torch.empty(x.shape[:-1] + (1,), device=x.device, dtype=torch.float32)
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
     finfo = torch.finfo(x_q.dtype)
     fp8_min = finfo.min
     fp8_max = finfo.max
-    #assert x.is_contiguous()
-    _per_token_quant_fp8[(M, )](
+    # assert x.is_contiguous()
+    _per_token_quant_fp8[(M,)](
         x,
         x_q,
         scales,
@@ -177,9 +175,10 @@ def per_token_quant_fp8(x):
         num_warps=num_warps,
         num_stages=1,
         fp8_min=fp8_min,
-        fp8_max=fp8_max
+        fp8_max=fp8_max,
     )
     return x_q, scales
+
 
 @triton.jit
 def vllm_scaled_mm_kernel_fp8(
@@ -372,7 +371,6 @@ def vllm_triton_scaled_mm_fp8(
         else:
             tile_shape = (128, 128, 128)
 
-
     block_size_m, block_size_n, block_size_k = tile_shape
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
@@ -407,6 +405,7 @@ def vllm_triton_scaled_mm_fp8(
     )
 
     return result.to(out_dtype)
+
 
 @lru_cache()
 def is_fp8_fnuz() -> bool:

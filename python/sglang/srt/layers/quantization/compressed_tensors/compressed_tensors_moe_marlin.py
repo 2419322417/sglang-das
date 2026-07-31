@@ -152,9 +152,9 @@ def w8a8_nt_kpack2_marlin_weight(
 ):
     assert w8a8_w.dtype == torch.int8, "w8a8_w 必须是 int8 类型"
     size_n, size_k = w8a8_w.shape
-    assert size_n % k_tile == 0 and size_k % n_tile == 0, (
-        "k_tile / n_tile 必须能整除对应维度"
-    )
+    assert (
+        size_n % k_tile == 0 and size_k % n_tile == 0
+    ), "k_tile / n_tile 必须能整除对应维度"
 
     q = w8a8_w.reshape((size_n // n_tile, n_tile, size_k // k_tile, k_tile))
     q = q.permute((0, 2, 1, 3)).contiguous()
@@ -172,9 +172,9 @@ def weight8bit_nt_kpack2_marlin1(
     assert weight.element_size() == 1, "weight 必须是 8 bit 类型"
     if weight.dim() == 2:
         size_n, size_k = weight.shape
-        assert size_n % k_tile == 0 and size_k % n_tile == 0, (
-            "k_tile / n_tile 必须能整除对应维度"
-        )
+        assert (
+            size_n % k_tile == 0 and size_k % n_tile == 0
+        ), "k_tile / n_tile 必须能整除对应维度"
 
         q = weight.reshape(
             (
@@ -191,9 +191,9 @@ def weight8bit_nt_kpack2_marlin1(
         # q = q.reshape((size_n // k_tile, size_k * k_tile))
     elif weight.dim() == 3:
         E, size_n, size_k = weight.shape
-        assert size_n % n_tile == 0 and size_k % k_tile == 0, (
-            "k_tile / n_tile 必须能整除对应维度"
-        )
+        assert (
+            size_n % n_tile == 0 and size_k % k_tile == 0
+        ), "k_tile / n_tile 必须能整除对应维度"
 
         q = weight.reshape(
             (
@@ -216,7 +216,7 @@ class CompressedTensorsMarlinMoEMethod(FusedMoEMethodBase):
     def get_moe_method(
         quant_config: "SlimQuantCompressedTensorsMarlinConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
-    ) -> "CompressedTensorsMarlinMoEMethod":
+    ) -> CompressedTensorsMarlinMoEMethod:
         # are supported + check if the layer is being ignored.
         weight_quant = quant_config.target_scheme_map["Linear"].get("weights")
         input_quant = quant_config.target_scheme_map["Linear"].get("input_activations")

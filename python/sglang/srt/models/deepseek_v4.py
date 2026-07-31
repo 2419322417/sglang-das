@@ -157,9 +157,9 @@ from sglang.srt.utils import (
     LazyValue,
     add_prefix,
     get_bool_env_var,
-    is_hcu,
     is_gfx95_supported,
     is_gfx942_supported,
+    is_hcu,
     log_info_on_rank0,
     make_layers,
 )
@@ -302,6 +302,7 @@ def _freqs_cis_to_cos_sin(
     sin = fr[..., 1].to(device=device, dtype=dtype).contiguous()
     _FREQS_CIS_TO_COS_SIN[key] = (cos, sin)
     return cos, sin
+
 
 _fused_qnorm_rope_cos_sin_cache: dict[tuple, torch.Tensor] = {}
 

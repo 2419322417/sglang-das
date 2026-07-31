@@ -301,9 +301,7 @@ def enable_fused_set_kv_buffer(forward_batch: ForwardBatch):
     if _is_hcu:
         return cuda_enabled
     return cuda_enabled or (
-        _is_hip
-        and not is_prefill_context_parallel_enabled()
-        and dcp_kv_mask is None
+        _is_hip and not is_prefill_context_parallel_enabled() and dcp_kv_mask is None
     )
 
 

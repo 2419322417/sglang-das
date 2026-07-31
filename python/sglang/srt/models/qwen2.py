@@ -140,7 +140,7 @@ class Qwen2Attention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         self.layer_id = layer_id
-        self.page_size=64
+        self.page_size = 64
         if get_server_args().kv_cache_dtype == "fp8_e4m3":
             self.kv_cache_dtype = torch.float8_e4m3fn
         elif get_server_args().kv_cache_dtype == "fp8_e5m2":
@@ -213,16 +213,16 @@ class Qwen2Attention(nn.Module):
         num_tokens = qkv.shape[0]
         if _is_hcu and _use_fused_rms_rotary:
             cos_sin_cache = self.rotary_emb.cos_sin_cache
-            if (cos_sin_cache.device != qkv.device
-                    or cos_sin_cache.dtype != qkv.dtype):
-                cos_sin_cache = cos_sin_cache.to(qkv.device,
-                                                dtype=qkv.dtype,
-                                                non_blocking=True)
+            if cos_sin_cache.device != qkv.device or cos_sin_cache.dtype != qkv.dtype:
+                cos_sin_cache = cos_sin_cache.to(
+                    qkv.device, dtype=qkv.dtype, non_blocking=True
+                )
                 # Persist the converted cache so we don't re-copy/re-allocate
                 # on every forward when the original buffer starts on CPU.
                 self.rotary_emb.cos_sin_cache = cos_sin_cache
             k_buffer, v_buffer = get_token_to_kv_pool().get_kv_buffer(self.layer_id)
-            q, k, v = split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant(positions,
+            q, k, v = split_qkv_rms_rotary_embedding_fuse_with_kv_store_quant(
+                positions,
                 qkv.contiguous(),
                 self.q_size,
                 self.kv_size,
@@ -242,10 +242,16 @@ class Qwen2Attention(nn.Module):
                 residual_k=None,
                 k_scale=None,
                 v_scale=None,
-                )
-            q = q.contiguous().view(num_tokens, self.q_size//self.head_dim, self.head_dim)
-            k = k.contiguous().view(num_tokens, self.kv_size//self.head_dim, self.head_dim)
-            v = v.contiguous().view(num_tokens, self.kv_size//self.head_dim, self.head_dim)
+            )
+            q = q.contiguous().view(
+                num_tokens, self.q_size // self.head_dim, self.head_dim
+            )
+            k = k.contiguous().view(
+                num_tokens, self.kv_size // self.head_dim, self.head_dim
+            )
+            v = v.contiguous().view(
+                num_tokens, self.kv_size // self.head_dim, self.head_dim
+            )
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = self.rotary_emb(positions, q, k)

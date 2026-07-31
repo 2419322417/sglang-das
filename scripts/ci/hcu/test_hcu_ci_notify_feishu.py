@@ -111,9 +111,7 @@ def _column_sets(card: dict) -> list:
 
 def _accuracy_table(card: dict) -> dict:
     tables = [
-        element
-        for element in card["body"]["elements"]
-        if element.get("tag") == "table"
+        element for element in card["body"]["elements"] if element.get("tag") == "table"
     ]
     assert len(tables) == 1
     return tables[0]

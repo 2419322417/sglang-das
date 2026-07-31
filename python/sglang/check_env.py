@@ -300,7 +300,9 @@ class HIPEnv(BaseEnv):
                 check=True,
             )
             topology_name = "HCU Topology" if self.is_hcu else "AMD Topology"
-            return {topology_name: "\n" + result.stdout if result.returncode == 0 else None}
+            return {
+                topology_name: "\n" + result.stdout if result.returncode == 0 else None
+            }
         except subprocess.SubprocessError:
             return {}
 

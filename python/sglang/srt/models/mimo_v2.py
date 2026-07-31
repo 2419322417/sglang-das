@@ -1212,9 +1212,9 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
         return self._routed_experts_weights_of_layer.value
 
     def get_input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
-        assert self.model is not None, (
-            "get_input_embedding() is not available in encoder_only mode"
-        )
+        assert (
+            self.model is not None
+        ), "get_input_embedding() is not available in encoder_only mode"
         return self.model.get_input_embedding(input_ids)
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):
@@ -1328,9 +1328,9 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
-        assert not self.config.encoder_only, (
-            "forward() should not be called in encoder_only mode"
-        )
+        assert (
+            not self.config.encoder_only
+        ), "forward() should not be called in encoder_only mode"
 
         if self._is_multimodal:
             hidden_states = general_mm_embed_routine(
@@ -1569,15 +1569,15 @@ class MiMoV2ForCausalLM(nn.Module, AudioEncoderMixin):
                         logger.warning(f"Parameter {name} not found in params_dict")
 
     def get_embed_and_head(self):
-        assert self.model is not None and self.lm_head is not None, (
-            "get_embed_and_head() is not available in encoder_only mode"
-        )
+        assert (
+            self.model is not None and self.lm_head is not None
+        ), "get_embed_and_head() is not available in encoder_only mode"
         return self.model.embed_tokens.weight, self.lm_head.weight
 
     def set_embed_and_head(self, embed, head):
-        assert self.model is not None and self.lm_head is not None, (
-            "set_embed_and_head() is not available in encoder_only mode"
-        )
+        assert (
+            self.model is not None and self.lm_head is not None
+        ), "set_embed_and_head() is not available in encoder_only mode"
         del self.model.embed_tokens.weight
         del self.lm_head.weight
         self.model.embed_tokens.weight = embed

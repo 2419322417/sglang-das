@@ -177,6 +177,7 @@ class PrefillBootstrapQueue:
                     "DeepSeek-V4 PD prefill admission uses legacy SWA pool cap: %d",
                     self.max_total_num_tokens,
                 )
+
     def _init_kv_manager(self) -> CommonKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()

@@ -99,10 +99,15 @@ def l2norm_fwd(
     if output_dtype is None:
         output_dtype = x.dtype
 
-    if _has_l2norm_cuda and x.is_cuda and x.dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
+    if (
+        _has_l2norm_cuda
+        and x.is_cuda
+        and x.dtype
+        in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        )
     ):
         y = _l2norm_cuda(x.contiguous(), eps)
         if y.dtype != output_dtype:

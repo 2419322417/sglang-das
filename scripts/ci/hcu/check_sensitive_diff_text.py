@@ -25,7 +25,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 SENSITIVE_TERMS = tuple(
     "".join(parts) for parts in (("d", "cu"), ("a", "md"), ("xg", "mi"))
 )
@@ -79,9 +78,11 @@ def run_git(repo, args, text=False):
         raise ToolFailure(f"unable to execute Git: {exc}") from exc
 
     if result.returncode != 0:
-        stderr = result.stderr.strip() if text else result.stderr.decode(
-            "utf-8", errors="replace"
-        ).strip()
+        stderr = (
+            result.stderr.strip()
+            if text
+            else result.stderr.decode("utf-8", errors="replace").strip()
+        )
         raise ToolFailure(
             f"Git command failed ({' '.join(command)}): {stderr or 'unknown error'}"
         )
@@ -120,7 +121,9 @@ def collect_changes(repo, base, head):
 
         if code in {"R", "C"}:
             if index + 1 >= len(tokens):
-                raise ToolFailure("unable to parse renamed or copied path from Git diff")
+                raise ToolFailure(
+                    "unable to parse renamed or copied path from Git diff"
+                )
             old_path = decode_path(tokens[index])
             new_path = decode_path(tokens[index + 1])
             index += 2
@@ -224,19 +227,11 @@ def text_snippet(text):
 
 
 def escape_annotation_data(text):
-    return (
-        text.replace("%", "%25")
-        .replace("\r", "%0D")
-        .replace("\n", "%0A")
-    )
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
 def escape_annotation_property(text):
-    return (
-        escape_annotation_data(text)
-        .replace(":", "%3A")
-        .replace(",", "%2C")
-    )
+    return escape_annotation_data(text).replace(":", "%3A").replace(",", "%2C")
 
 
 def emit_github_error(violation):

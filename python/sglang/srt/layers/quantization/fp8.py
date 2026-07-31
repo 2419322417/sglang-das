@@ -90,10 +90,10 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_gfx95_supported,
+    is_hcu,
     is_hip,
     is_musa,
     is_npu,
-    is_hcu,
     is_sm90_supported,
     is_sm100_supported,
     is_sm120_supported,
@@ -104,6 +104,7 @@ from sglang.srt.utils import (
     use_intel_amx_backend,
     use_intel_xpu_backend,
 )
+
 SGLANG_USE_AITER_FP8_ASM_MOE = False
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ _mxfp8_to_block_fp8_required = mxfp8_block_convert_required()
 _use_hip_int4 = get_bool_env_var("SGLANG_INT4_WEIGHT") and _is_hip
 _use_aiter = envs.SGLANG_USE_AITER.get() and _is_hip
 _is_shuffle_moe_mxfp4 = is_gfx95_supported() and not _is_hcu
+
 
 def _require_fp4_dtype():
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
@@ -669,7 +671,9 @@ class Fp8LinearMethod(LinearMethodBase):
             )
             weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
 
-        from sglang.srt.layers.quantization.fp8_utils import hipblaslt_w8a8_block_fp8_linear
+        from sglang.srt.layers.quantization.fp8_utils import (
+            hipblaslt_w8a8_block_fp8_linear,
+        )
 
         if self.w8a8_block_fp8_linear is hipblaslt_w8a8_block_fp8_linear:
             weight = weight.T.contiguous()

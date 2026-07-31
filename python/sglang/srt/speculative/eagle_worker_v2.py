@@ -1187,9 +1187,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 else CaptureHiddenMode.FULL
             )
             batch.capture_hidden_mode = target_capture_mode
-            batch.return_hidden_states_before_norm = (
-                self.need_hidden_states_before_norm
-            )
+            batch.return_hidden_states_before_norm = self.need_hidden_states_before_norm
             batch_output = self.target_worker.forward_batch_generation(batch)
 
             # Spec_v2 convention: batch.seq_lens = length BEFORE this iter's tokens.

@@ -32,9 +32,9 @@ from sglang.test import simple_eval_common as common
 from sglang.test.simple_eval_common import (
     ANSWER_PATTERN_MULTICHOICE,
     HTML_JINJA,
+    QUERY_TEMPLATE_MULTICHOICE,
     Eval,
     EvalResult,
-    QUERY_TEMPLATE_MULTICHOICE,
     SamplerBase,
     SingleEvalResult,
     format_multichoice_question,
@@ -174,9 +174,11 @@ class MMLUEval(Eval):
                 sampler._pack_message(
                     content=format_multichoice_question(
                         row,
-                        self.query_template
-                        if self.query_template is not None
-                        else QUERY_TEMPLATE_MULTICHOICE,
+                        (
+                            self.query_template
+                            if self.query_template is not None
+                            else QUERY_TEMPLATE_MULTICHOICE
+                        ),
                     ),
                     role="user",
                 )

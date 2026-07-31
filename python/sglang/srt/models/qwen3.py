@@ -48,7 +48,15 @@ from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.runtime_context import get_parallel, get_server_args, get_stream
-from sglang.srt.utils import add_prefix, get_bool_env_var, is_cuda, is_hcu, is_hip, is_npu
+from sglang.srt.utils import (
+    add_prefix,
+    get_bool_env_var,
+    is_cuda,
+    is_hcu,
+    is_hip,
+    is_npu,
+)
+
 _use_fused_qwen_bailing_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 
 Qwen3Config = None
@@ -77,6 +85,7 @@ if _is_npu:
 
 if _is_hcu:
     from lightop import rms_rotary_embedding_fuse_with_kv_store
+
 
 class Qwen3Attention(nn.Module):
     def __init__(
@@ -201,11 +210,10 @@ class Qwen3Attention(nn.Module):
         if _is_hcu and _use_fused_qwen_bailing_rotary:
             # Fused RMSNorm + RoPE + kv_store path through custom op.
             cos_sin_cache = self.rotary_emb.cos_sin_cache
-            if (cos_sin_cache.device != q.device
-                    or cos_sin_cache.dtype != q.dtype):
-                cos_sin_cache = cos_sin_cache.to(q.device,
-                                                dtype=q.dtype,
-                                                non_blocking=True)
+            if cos_sin_cache.device != q.device or cos_sin_cache.dtype != q.dtype:
+                cos_sin_cache = cos_sin_cache.to(
+                    q.device, dtype=q.dtype, non_blocking=True
+                )
                 # Persist the converted cache so we don't re-copy/re-allocate
                 # on every forward when the original buffer starts on CPU.
                 self.rotary_emb.cos_sin_cache = cos_sin_cache
