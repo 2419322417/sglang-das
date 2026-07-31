@@ -381,7 +381,9 @@ def _column_set(columns: List[Tuple[str, int]], *, grey: bool = False) -> dict:
 
 
 def _short_image_id(image_id: str) -> str:
-    compact = _single_line(image_id).removeprefix("sha256:")
+    compact = _single_line(image_id)
+    if compact.startswith("sha256:"):
+        compact = compact[len("sha256:") :]
     return compact[:12] or "unknown"
 
 
