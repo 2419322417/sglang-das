@@ -886,6 +886,7 @@ class CommonKVSender(BaseKVSender):
         self._transfer_metric = KVTransferMetric()
         self._transfer_num_kv_indices = 0
         self._transfer_num_state_indices = 0
+        self._abort_notified = False
         # inner state
         self.curr_idx = 0
         if self.kv_mgr.is_dummy_cp_rank:
@@ -985,7 +986,42 @@ class CommonKVSender(BaseKVSender):
         if hasattr(self.kv_mgr, "transfer_infos"):
             self.kv_mgr.transfer_infos.pop(self.bootstrap_room, None)
 
+    def _notify_abort_to_bootstrap(self):
+        try:
+            response = requests.post(
+                f"http://{self.bootstrap_server_url}/abort_room",
+                json={"bootstrap_room": self.bootstrap_room},
+                timeout=(0.5, 1),
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to notify bootstrap server that room %s was aborted: "
+                    "status=%s, body=%s",
+                    self.bootstrap_room,
+                    response.status_code,
+                    response.text,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to notify bootstrap server that room %s was aborted: %s",
+                self.bootstrap_room,
+                e,
+            )
+
     def abort(self):
+        if (
+            not self._abort_notified
+            and self.kv_mgr.attn_tp_rank == 0
+            and self.kv_mgr.attn_cp_rank == 0
+            and self.kv_mgr.pp_rank == 0
+        ):
+            self._abort_notified = True
+            threading.Thread(
+                target=self._notify_abort_to_bootstrap,
+                name=f"notify-abort-{self.bootstrap_room}",
+                daemon=True,
+            ).start()
+
         self.kv_mgr.record_failure(
             self.bootstrap_room,
             "Aborted by AbortReq.",
@@ -1216,6 +1252,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             int, Dict[int, Dict[int, Dict[int, PrefillRankInfo]]]
         ] = {}
         self.room_to_dp_rank: Dict[int, Dict[str, Union[int, float]]] = {}
+        self.aborted_rooms: Dict[int, float] = {}
         self._registered_count = 0
         self.entry_cleanup_interval = (
             envs.SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL.get()
@@ -1246,6 +1283,10 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         self.app.router.add_route("*", "/route", self._handle_route)
         self.app.router.add_post("/register_dp_rank", self._handle_register_dp_rank)
         self.app.router.add_post("/query_dp_ranks", self._handle_query_dp_ranks)
+        self.app.router.add_post("/abort_room", self._handle_abort_room)
+        self.app.router.add_post(
+            "/query_aborted_rooms", self._handle_query_aborted_rooms
+        )
         self.app.router.add_get("/health", self._handle_health_check)
 
     async def _handle_health_check(self, request):
@@ -1414,22 +1455,54 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                     result[str(room_int)] = self.room_to_dp_rank[room_int]["dp_rank"]
         return web.json_response(result, status=200)
 
+    async def _handle_abort_room(self, request: web.Request):
+        data = await request.json()
+        bootstrap_room = int(data["bootstrap_room"])
+        async with self.lock:
+            self.aborted_rooms[bootstrap_room] = time.time()
+        logger.info("Registered aborted bootstrap room %s", bootstrap_room)
+        return web.Response(text="OK", status=200)
+
+    async def _handle_query_aborted_rooms(self, request: web.Request):
+        data = await request.json()
+        bootstrap_rooms = data["bootstrap_rooms"]
+        async with self.lock:
+            aborted_rooms = [
+                int(room)
+                for room in bootstrap_rooms
+                if int(room) in self.aborted_rooms
+            ]
+        return web.json_response({"aborted_rooms": aborted_rooms}, status=200)
+
     async def _cleanup_expired_entries(self):
-        """Remove entries older than cleanup interval from room_to_dp_rank."""
+        """Remove bootstrap metadata older than the cleanup interval."""
         while True:
             await asyncio.sleep(self.entry_cleanup_interval)
             current_time = time.time()
             async with self.lock:
-                expired_keys = [
+                expired_dp_rank_rooms = [
                     key
                     for key, value in self.room_to_dp_rank.items()
                     if current_time - value["timestamp"] > self.entry_cleanup_interval
                 ]
-                for key in expired_keys:
+                for key in expired_dp_rank_rooms:
                     del self.room_to_dp_rank[key]
-            if expired_keys:
+                expired_aborted_rooms = [
+                    room
+                    for room, timestamp in self.aborted_rooms.items()
+                    if current_time - timestamp > self.entry_cleanup_interval
+                ]
+                for room in expired_aborted_rooms:
+                    del self.aborted_rooms[room]
+            if expired_dp_rank_rooms:
                 logger.debug(
-                    f"Cleaned up {len(expired_keys)} expired entries from room_to_dp_rank"
+                    "Cleaned up %s expired entries from room_to_dp_rank",
+                    len(expired_dp_rank_rooms),
+                )
+            if expired_aborted_rooms:
+                logger.debug(
+                    "Cleaned up %s expired entries from aborted_rooms",
+                    len(expired_aborted_rooms),
                 )
 
     def _run_server(self):

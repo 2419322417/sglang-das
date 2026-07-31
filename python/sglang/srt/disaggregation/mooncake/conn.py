@@ -1654,6 +1654,59 @@ class MooncakeKVManager(CommonKVManager):
 
         threading.Thread(target=bootstrap_thread).start()
 
+    def _sync_aborted_rooms(self, bootstrap_addr, session):
+        current_rooms = self.addr_to_rooms_tracker[bootstrap_addr].copy()
+        active_rooms = []
+        for bootstrap_room in current_rooms:
+            if bootstrap_room in self.request_status:
+                active_rooms.append(bootstrap_room)
+            else:
+                self.addr_to_rooms_tracker[bootstrap_addr].discard(bootstrap_room)
+
+        if not active_rooms:
+            return
+
+        response = session.post(
+            f"http://{bootstrap_addr}/query_aborted_rooms",
+            json={"bootstrap_rooms": active_rooms},
+            timeout=(2, 3),
+            headers={"Connection": "keep-alive"},
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "Failed to query aborted rooms from %s: status=%s, body=%s",
+                bootstrap_addr,
+                response.status_code,
+                response.text,
+            )
+            return
+
+        aborted_rooms = response.json().get("aborted_rooms", [])
+        detected_rooms = []
+        for bootstrap_room in aborted_rooms:
+            bootstrap_room = int(bootstrap_room)
+            if (
+                bootstrap_room not in self.request_status
+                or self.request_status[bootstrap_room] == KVPoll.Failed
+            ):
+                continue
+            self.record_failure(
+                bootstrap_room,
+                "Prefill request was aborted before KV transfer.",
+            )
+            self.update_status(bootstrap_room, KVPoll.Failed)
+            detected_rooms.append(bootstrap_room)
+
+        if (
+            detected_rooms
+            and self.attn_tp_rank == 0
+            and self.attn_cp_rank == 0
+        ):
+            logger.info(
+                "Marked decode prealloc rooms as failed after prefill abort: %s",
+                detected_rooms,
+            )
+
     def start_decode_thread(self):
         def decode_thread():
             while True:
@@ -1734,17 +1787,7 @@ class MooncakeKVManager(CommonKVManager):
                         )
                         if response.status_code == 200:
                             self.heartbeat_failures[bootstrap_addr] = 0
-
-                            current_rooms = self.addr_to_rooms_tracker[
-                                bootstrap_addr
-                            ].copy()
-
-                            for bootstrap_room in current_rooms:
-                                # Remove KVPoll.Success requests from the tracker
-                                if bootstrap_room not in self.request_status:
-                                    self.addr_to_rooms_tracker[bootstrap_addr].discard(
-                                        bootstrap_room
-                                    )
+                            self._sync_aborted_rooms(bootstrap_addr, session)
                         else:
                             logger.info(
                                 f"Attempting to reconnect to {bootstrap_addr}..."
