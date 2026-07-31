@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,7 +40,7 @@ from sglang.srt.utils import (
     is_cuda,
     is_hip,
     is_musa,
-    is_dcu,
+    is_hcu,
     is_npu,
     is_xpu,
     set_weight_attrs,
@@ -51,7 +54,7 @@ _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 
 if _is_cuda:
     from sglang.jit_kernel.activation import (
@@ -93,8 +96,8 @@ class SiluAndMul(MultiPlatformOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        if is_dcu:
-            from lightop import fuse_silu_and_mul
+        if _is_hcu:
+            from lightop.activation import fuse_silu_and_mul
             fuse_silu_and_mul(x, out)
         else:
             silu_and_mul(x, out)

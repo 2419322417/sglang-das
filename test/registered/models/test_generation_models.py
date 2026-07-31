@@ -1,8 +1,12 @@
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_dcu_ci
-register_dcu_ci(
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_hcu_ci
+register_hcu_ci(
     est_time=106,
-    suite="stage-b-test-1-gpu-small-dcu",
-    disabled="DCU Stage-B deferred: generation model matrix includes gated/remote models; needs a BW1100 local-model matrix before enabling.",
+    suite="stage-b-test-1-hcu-small",
+    disabled="HCU Stage-B deferred: generation model matrix includes gated/remote models; needs a BW1100 local-model matrix before enabling.",
 )
 
 

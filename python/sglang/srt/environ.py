@@ -258,6 +258,9 @@ class Envs:
     SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS = EnvStr("{}")
     SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER = EnvBool(False)
     SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK = EnvBool(False)
+    # DeepSeek-V4 only needs the SWA tail during PD prefill/decode transfer.
+    # Set to false to restore the legacy admission cap based on the SWA pool.
+    SGLANG_DSV4_PD_PREFILL_USE_FULL_TOKEN_POOL = EnvBool(True)
     # Extra slots in req_to_token_pool for decode workers (only effective when
     # max_num_reqs > 32). Increases pool capacity so more KV cache transfers
     # can overlap with decode execution without raising max_running_requests.
@@ -275,6 +278,11 @@ class Envs:
     SGLANG_PREFILL_DELAYER_MAX_DELAY_PASSES = EnvInt(None)
     SGLANG_PREFILL_DELAYER_TOKEN_USAGE_LOW_WATERMARK = EnvFloat(None)
     SGLANG_DATA_PARALLEL_BUDGET_INTERVAL = EnvInt(1)
+    # Optional: with DP-attention, send control messages to every DP group
+    # leader and broadcast within attn_tp/cp group instead of full tp_group.
+    # Prefer this over --enable-dp-attention-local-control-broadcast so PD+DP
+    # workloads are not forced to flip a global CLI flag.
+    SGLANG_ENABLE_DP_ATTENTION_LOCAL_CONTROL_BROADCAST = EnvBool(False)
     SGLANG_REQ_WAITING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_NCCL_ALL_GATHER_IN_OVERLAP_SCHEDULER_SYNC_BATCH = EnvBool(False)
     SGLANG_REQ_RUNNING_TIMEOUT = EnvFloat(-1)  # in seconds
@@ -319,7 +327,7 @@ class Envs:
     ENABLE_ASCEND_TRANSFER_WITH_MOONCAKE = EnvBool(False)
     ASCEND_NPU_PHY_ID = EnvInt(-1)
     SGLANG_MOONCAKE_SEND_AUX_TCP = EnvBool(False)
-    SGLANG_KV_LAYOUT_DCU_FA = EnvBool(True)
+    SGLANG_KV_LAYOUT_HCU_FA = EnvBool(True)
 
     # Mooncake Store
     SGLANG_HICACHE_MOONCAKE_CONFIG_PATH = EnvStr(None)
@@ -347,7 +355,7 @@ class Envs:
     # ROCm/AITER path. Requires GPU_MAX_HW_QUEUES>=5 to avoid HW-queue serialization.
     SGLANG_ROCM_USE_MULTI_STREAM = EnvBool(False)
 
-    # DCU Lightop
+    # HCU Lightop
     SGLANG_USE_LIGHTOP = EnvBool(False)
 
     # MPS (Apple Silicon)
@@ -383,7 +391,7 @@ class Envs:
     # MTHREADS & MUSA
     SGLANG_MUSA_FA3_FORCE_UPDATE_METADATA = EnvBool(False)
 
-    # DCU
+    # HCU
     SGLANG_USE_FUSED_DPSKV4_SILU_MUL_FP8_QUANT = EnvBool(False)
     SGLANG_USE_LIGHTOP_GROUP_FP8_QUANT = EnvBool(False)
     SGLANG_USE_LINEAR_BF16_FP32_USE_BLASLT = EnvBool(False)
@@ -649,7 +657,7 @@ class Envs:
     # DeepGemm Mega MoE
     SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE = EnvBool(False)
     SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK = EnvInt(1024)
-    SGLANG_DCU_MEGA_MOE_RUNTIME = EnvStr("deep_gemm")
+    SGLANG_HCU_MEGA_MOE_RUNTIME = EnvStr("deep_gemm")
 
     # When set, the mega-MoE x slot is packed E2M1 (FP4) instead of FP8 E4M3.
     # Halves symm-buffer footprint and unlocks the MXF4 mainloop downstream.

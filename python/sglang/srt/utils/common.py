@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -94,6 +97,8 @@ from sglang.srt.environ import envs
 from sglang.srt.observability.func_timer import enable_func_timer
 from sglang.srt.utils.video_decoder import _BACKEND, VideoDecoderWrapper
 
+from lightop.config import get_w8a8_config_dir
+
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
@@ -171,12 +176,8 @@ def is_hcu() -> bool:
         return False
 
 
-def is_dcu() -> bool:
-    return is_hcu()
-
-
 @lru_cache(maxsize=1)
-def is_dcu_native_fp8_supported() -> bool:
+def is_hcu_native_fp8_supported() -> bool:
     if not is_hcu():
         return False
     try:
@@ -4253,8 +4254,7 @@ class W8a8GetCacheJSON:
         return cls._instance
 
     def _initialize(self):
-        current_folder_path = os.path.dirname(os.path.abspath(__file__))
-        json_folder_path=current_folder_path+'/../../lmslim/configs/w8a8'
+        json_folder_path=get_w8a8_config_dir()
 
         self.triton_json_dir=(os.getenv('TRITON_JSON_DIR', json_folder_path))
         self.triton_json_dict={}

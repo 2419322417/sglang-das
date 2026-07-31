@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,6 +33,7 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 from sglang.srt.layers.attention.nsa.utils import (
     can_nsa_cp_split,
     is_nsa_enable_prefill_cp,
+    is_nsa_prefill_cp_round_robin_split,
     nsa_use_prefill_cp,
 )
 from sglang.srt.layers.dp_attention import (
@@ -40,6 +44,7 @@ from sglang.srt.layers.dp_attention import (
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe.utils import is_sbo_enabled
 from sglang.srt.layers.quantization import Fp8Config
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.utils.cp_utils import (
@@ -58,7 +63,6 @@ from sglang.srt.models.deepseek_v2 import DeepseekV2DecoderLayer, DeepseekV3ForC
 from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import BumpAllocator, add_prefix, is_cuda, is_npu
-from sglang.srt.layers.moe.utils import is_sbo_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +129,7 @@ class DeepseekModelNextN(nn.Module):
 
         self.alt_stream = (
             torch.cuda.Stream()
-            if _is_cuda or envs.SGLANG_NPU_USE_MULTI_STREAM.get() or is_sbo_enabled() 
+            if _is_cuda or envs.SGLANG_NPU_USE_MULTI_STREAM.get() or is_sbo_enabled()
             else None
         )
 
@@ -197,10 +201,15 @@ class DeepseekModelNextN(nn.Module):
             else:
                 hidden_states = self.eh_proj(eh_input)
 
-        if nsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp):
+        use_cp = nsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp)
+        if use_cp:
             hidden_states = cp_split_and_rebuild_data(forward_batch, hidden_states)
             positions = cp_split_and_rebuild_position(forward_batch, positions)
         residual = None
+        should_update_mtp_topk_indices = (
+            forward_batch.reuse_mtp_topk_indices
+            or forward_batch.capture_mtp_topk_indices
+        )
         with get_global_expert_distribution_recorder().disable_this_region():
             hidden_states, residual, topk_indices = self.decoder(
                 positions,
@@ -214,8 +223,6 @@ class DeepseekModelNextN(nn.Module):
                     else None
                 ),
             )
-            if forward_batch.reuse_mtp_topk_indices:
-                forward_batch.topk_indices = topk_indices
 
         if not forward_batch.forward_mode.is_idle():
             if residual is not None:
@@ -223,14 +230,49 @@ class DeepseekModelNextN(nn.Module):
             else:
                 hidden_states = self.shared_head.norm(hidden_states)
 
-            if nsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp):
+            if use_cp:
                 # allgather + rerrange
+                local_num_tokens = hidden_states.shape[0]
                 hidden_states = cp_all_gather_rerange_output(
                     hidden_states,
                     self.cp_size,
                     forward_batch,
                     torch.cuda.current_stream(),
                 )
+                # The NSA decoder produces CP-local per-token top-k indices.
+                # Restore the global token order before speculative decoding
+                # reuses or captures them as the seed for the next MTP step.
+                if should_update_mtp_topk_indices and topk_indices is not None:
+                    # CP round-robin split leaves each rank with an uneven
+                    # local row count (e.g. 168/167/167/167 for len=669, cp=4);
+                    # pad to match hidden_states so cp_all_gather_rerange_output
+                    # doesn't produce a jagged result and the subsequent
+                    # index_select stays in bounds.
+                    if (
+                        is_nsa_prefill_cp_round_robin_split()
+                        and topk_indices.shape[0] < local_num_tokens
+                    ):
+                        pad_rows = local_num_tokens - topk_indices.shape[0]
+                        topk_indices = torch.cat(
+                            [
+                                topk_indices,
+                                topk_indices.new_full(
+                                    (pad_rows, topk_indices.shape[1]), -1
+                                ),
+                            ],
+                            dim=0,
+                        )
+                    topk_indices = cp_all_gather_rerange_output(
+                        topk_indices,
+                        self.cp_size,
+                        forward_batch,
+                        torch.cuda.current_stream(),
+                    )
+
+        # Keep top-k indices in the same global token coordinate system as
+        # hidden_states and extend_seq_lens.
+        if should_update_mtp_topk_indices and topk_indices is not None:
+            forward_batch.topk_indices = topk_indices
 
         if _is_npu and self.quant_config is None:
             os.environ["SGLANG_DEEPEP_BF16_DISPATCH"] = "0"

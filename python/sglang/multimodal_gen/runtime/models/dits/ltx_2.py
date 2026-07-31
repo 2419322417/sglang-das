@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copied and adapted from LTX-2 and WanVideo implementations.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -738,9 +741,9 @@ class LTX2Attention(nn.Module):
         if self.to_gate_logits is not None:
             gate_logits, _ = self.to_gate_logits(gate_input)
             b, t = out.shape[:2]
-            out = out.view(b, t, self.local_heads, self.dim_head)
+            out = out.reshape(b, t, self.local_heads, self.dim_head)
             out = out * (2.0 * torch.sigmoid(gate_logits).unsqueeze(-1))
-            out = out.view(b, t, self.local_heads * self.dim_head)
+            out = out.reshape(b, t, self.local_heads * self.dim_head)
 
         out_flat = out.flatten(2)
         out_proj, _ = self.to_out[0](out_flat)

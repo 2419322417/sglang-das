@@ -93,21 +93,22 @@ from sglang.srt.utils import (
     LazyValue,
     add_prefix,
     get_bool_env_var,
-    is_dcu,
+    is_hcu,
     log_info_on_rank0,
     make_layers,
 )
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 _use_dpskv4_lightop_rmsnorm = get_bool_env_var("SGLANG_USE_DPSKV4_LIGHTOP_RMSNORM")
 _use_fused_qnorm_rope_kv_rope_quant = get_bool_env_var(
     "SGLANG_USE_FUSED_DPSKV4_QNORM_ROPE_KV_ROPE_QUANT"
 )
 _use_aiter_tilelang_mhc = get_bool_env_var("SGLANG_ROCM_USE_AITER_TILELANG_MHC")
 
-if _is_dcu:
-    from lightop import op
+if _is_hcu:
+    from lightop import attention as lightop_attention
+    from lightop import norm as lightop_norm
 
     if _use_aiter_tilelang_mhc:
         from aiter.ops.tilelang import mhc_post_fwd, mhc_pre_big_fuse
@@ -115,6 +116,24 @@ if _is_dcu:
 logger = logging.getLogger(__name__)
 
 _FP8_WO_A_GEMM = envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
+
+_fused_qnorm_rope_cos_sin_cache: dict[tuple, torch.Tensor] = {}
+
+
+def _get_fused_qnorm_rope_cos_sin_cache(freqs_cis: torch.Tensor) -> torch.Tensor:
+    key = (
+        freqs_cis.device.type,
+        freqs_cis.device.index,
+        freqs_cis.data_ptr(),
+    )
+    cache = _fused_qnorm_rope_cos_sin_cache.get(key)
+    if cache is None:
+        freqs_real = torch.view_as_real(freqs_cis)  # [max_pos, 32, 2]
+        cache = torch.cat(
+            [freqs_real[..., 0], freqs_real[..., 1]], dim=-1
+        ).contiguous()  # [max_pos, 64], first 32 cos, last 32 sin
+        _fused_qnorm_rope_cos_sin_cache[key] = cache
+    return cache
 
 
 if TYPE_CHECKING:
@@ -249,12 +268,10 @@ class MQALayer(nn.Module):
 
         self.register_buffer("cos_sin_cache_fused", None, persistent=False)
         self.cos_sin_cache_fused: Optional[torch.Tensor]
-        if _is_dcu and _use_fused_qnorm_rope_kv_rope_quant:
-            freqs_real = torch.view_as_real(self.freqs_cis)  # [max_pos, 32, 2]
-            cos_sin_cache = torch.cat(
-                [freqs_real[..., 0], freqs_real[..., 1]], dim=-1
-            ).contiguous()  # [max_pos, 64], first 32 cos, last 32 sin
-            self.cos_sin_cache_fused = cos_sin_cache
+        if _is_hcu and _use_fused_qnorm_rope_kv_rope_quant:
+            self.cos_sin_cache_fused = _get_fused_qnorm_rope_cos_sin_cache(
+                self.freqs_cis
+            )
 
         if envs.SGLANG_OPT_USE_MULTI_STREAM_OVERLAP.get() and alt_streams is not None:
             self.alt_streams = alt_streams[:3]
@@ -395,8 +412,8 @@ class MQALayer(nn.Module):
         # fused_q_norm_rope(q, q_out, self.eps, self.freqs_cis, positions)
         # return q_out
 
-        if _is_dcu and _use_dpskv4_lightop_rmsnorm:
-            op.rms_norm_no_weight(None, q, None, self.eps)
+        if _is_hcu and _use_dpskv4_lightop_rmsnorm:
+            lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
         else:
             q = rms_normalize_triton(q, self.eps)
         if positions is not None:
@@ -543,7 +560,7 @@ class MQALayer(nn.Module):
 
         _cp_enabled = self.nsa_enable_prefill_cp and nsa_use_prefill_cp(forward_batch)
         _bf16_kv_cache = forward_batch.token_to_kv_pool.is_bf16_attention_kv_cache
-        _use_lightop_qnorm_rope = _use_fused_qnorm_rope_kv_rope_quant and _is_dcu
+        _use_lightop_qnorm_rope = _use_fused_qnorm_rope_kv_rope_quant and _is_hcu
         if _use_lightop_qnorm_rope:
             cos_sin_cache_fused = self.cos_sin_cache_fused
             assert cos_sin_cache_fused is not None
@@ -561,7 +578,7 @@ class MQALayer(nn.Module):
             raw_loc = forward_batch.out_cache_loc
             slot_mapping = pool.translate_loc_from_full_to_swa(raw_loc)
 
-            op.fused_deepseek_v4_qnorm_rope_kvnorm_rope_quant_insert_int32(
+            lightop_attention.fused_deepseek_v4_qnorm_rope_kvnorm_rope_quant_insert_int32(
                 q,
                 kv,
                 self.kv_norm.weight,
@@ -576,7 +593,7 @@ class MQALayer(nn.Module):
             if _use_lightop_qnorm_rope:
                 # CP must all-gather/rerange KV before cache insert, so only fuse
                 # the local Q norm/RoPE and local KV norm/RoPE here.
-                op.fused_deepseek_v4_qnorm_rope_kvnorm_rope(
+                lightop_attention.fused_deepseek_v4_qnorm_rope_kvnorm_rope(
                     q,
                     kv,
                     self.kv_norm.weight,
@@ -589,8 +606,8 @@ class MQALayer(nn.Module):
                 if self.use_jit_norm:
                     q = rmsnorm_self(q, self.eps)
                 else:
-                    if _is_dcu and _use_dpskv4_lightop_rmsnorm:
-                        op.rms_norm_no_weight(None, q, None, self.eps)
+                    if _is_hcu and _use_dpskv4_lightop_rmsnorm:
+                        lightop_norm.rms_norm_no_weight(None, q, None, self.eps)
                     else:
                         q = rms_normalize_triton(q, self.eps)
 
@@ -686,7 +703,7 @@ class MQALayer(nn.Module):
         _fused_cache_insert_path = (
             _use_fused_qnorm_rope_kv_rope_quant
             and not _cp_enabled
-            and _is_dcu
+            and _is_hcu
             and not enable_multi_stream
             and not forward_batch.token_to_kv_pool.is_bf16_attention_kv_cache
         )
@@ -854,7 +871,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             return y, post, comb, False
 
         if envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
-            if _is_dcu and _use_aiter_tilelang_mhc:
+            if _is_hcu and _use_aiter_tilelang_mhc:
                 post, comb, y = mhc_pre_big_fuse(
                     residual=x,
                     fn=hc_fn,
@@ -937,7 +954,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         if envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get():
-            if _is_dcu and _use_aiter_tilelang_mhc:
+            if _is_hcu and _use_aiter_tilelang_mhc:
                 out = mhc_post_fwd(
                     x,
                     residual,
@@ -1200,21 +1217,34 @@ class DeepseekV4Model(nn.Module):
                     input_ids=input_ids,
                     input_ids_global=input_ids_global,
                 )
-
+        if not self.pp_group.is_last_rank:
+            # Flatten 3D mHC tensor for PP IPC.
+            return PPProxyTensors({"hidden_states": hidden_states.flatten(1)})
+        need_pre_hc_head = getattr(
+            forward_batch, "return_hidden_states_before_norm", False
+        )
         # CP all-gather only on the last PP rank; PP IPC carries CP-split tensors.
-        if self.pp_group.is_last_rank and nsa_use_prefill_cp(forward_batch):
+        if nsa_use_prefill_cp(forward_batch):
+            pre_hc_head = None
+            if need_pre_hc_head:
+                pre_hc_head = cp_all_gather_rerange_output(
+                    hidden_states.flatten(1),
+                    self.cp_size,
+                    forward_batch,
+                    torch.cuda.current_stream(),
+                )
+            hidden_states = self.hc_head(
+                hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base
+            )
+            hidden_states = self.norm(hidden_states)
             hidden_states = cp_all_gather_rerange_output(
                 hidden_states,
                 self.cp_size,
                 forward_batch,
                 torch.cuda.current_stream(),
             )
-
-        if not self.pp_group.is_last_rank:
-            # Flatten 3D mHC tensor for PP IPC.
-            return PPProxyTensors({"hidden_states": hidden_states.flatten(1)})
-
-        pre_hc_head = hidden_states.flatten(1)
+            return hidden_states, pre_hc_head
+        pre_hc_head = hidden_states.flatten(1) if need_pre_hc_head else None
 
         hidden_states = self.hc_head(
             hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base

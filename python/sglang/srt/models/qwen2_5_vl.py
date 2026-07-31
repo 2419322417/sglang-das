@@ -1,4 +1,7 @@
 # coding=utf-8
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Adapted from
 # https://github.com/huggingface/transformers/blob/19e6e80e10118f855137b90740936c0b11ac397f/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 # Copyright 2024 The Qwen team.
@@ -459,7 +462,6 @@ class Qwen2_5_VisionTransformer(nn.Module, RotaryPosMixin):
                 .to(device=x.device, dtype=torch.int32),
             ]
         )
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
         # cu_seqlens must be on cpu because of npu_flash_attention_unpad operator restriction
         if is_npu():
             cu_seqlens = cu_seqlens.to("cpu")
@@ -540,8 +542,6 @@ class Qwen2_5_VisionTransformer(nn.Module, RotaryPosMixin):
                 .to(device=x.device, dtype=torch.int32),
             ]
         )
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-
         return self.cuda_graph_runner.run(
             x=x,
             position_embeddings=position_embeddings,

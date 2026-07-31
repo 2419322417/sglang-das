@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import copy
 import logging
 from typing import Any
@@ -52,9 +56,10 @@ def _server_args_for_transformer_component(
 
 
 def _should_use_streaming_state_dict_load(server_args: ServerArgs) -> bool:
+    tp_size = getattr(server_args, "tp_size", 1) or 1
     sp_degree = getattr(server_args, "sp_degree", 1) or 1
     ulysses_degree = getattr(server_args, "ulysses_degree", 1) or 1
-    return bool(sp_degree > 1 and ulysses_degree > 1)
+    return bool(tp_size > 1 or (sp_degree > 1 and ulysses_degree > 1))
 
 
 class TransformerLoader(ComponentLoader):

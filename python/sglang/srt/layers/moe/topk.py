@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -109,7 +112,7 @@ from sglang.srt.utils import (
     get_compiler_backend,
     is_cpu,
     is_cuda,
-    is_dcu,
+    is_hcu,
     is_hip,
     is_musa,
     is_npu,
@@ -124,7 +127,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_xpu = is_xpu()
@@ -203,14 +206,14 @@ if _is_musa:
 
     from sglang.srt.hardware_backend.musa.kernels.topk import topk_sigmoid, topk_softmax
 if _use_lightop:
-    from lightop import op as op
+    from lightop import moe as op
 
 _use_lightop_sqrtsoftplus_gate = (
-    _use_lightop and _is_dcu and hasattr(op, "moe_fused_gate_sqrtsoftplus")
+    _use_lightop and _is_hcu and hasattr(op, "moe_fused_gate_sqrtsoftplus")
 )
 
 
-def moe_fused_gate_dcu(
+def moe_fused_gate_hcu(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor,
     num_expert_group: int,
@@ -218,6 +221,7 @@ def moe_fused_gate_dcu(
     topk: int,
     num_fused_shared_experts: int,
     routed_scaling_factor: float,
+    apply_routed_scaling_factor_on_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     topk_weights, topk_ids = op.moe_fused_gate(
         gating_output,
@@ -227,6 +231,7 @@ def moe_fused_gate_dcu(
         topk,
         num_fused_shared_experts,
         routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
     )
     return topk_weights, topk_ids
 
@@ -239,6 +244,7 @@ def moe_fused_gate_fake(
     topk: int,
     num_fused_shared_experts: int,
     routed_scaling_factor: float,
+    apply_routed_scaling_factor_on_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty(
         (gating_output.size(0), topk),
@@ -252,8 +258,8 @@ def moe_fused_gate_fake(
 
 
 direct_register_custom_op(
-    op_name="moe_fused_gate_dcu",
-    op_func=moe_fused_gate_dcu,
+    op_name="moe_fused_gate_hcu",
+    op_func=moe_fused_gate_hcu,
     mutates_args=[],
     fake_impl=moe_fused_gate_fake,
 )
@@ -261,7 +267,7 @@ direct_register_custom_op(
 
 if _use_lightop_sqrtsoftplus_gate:
 
-    def moe_fused_gate_sqrtsoftplus_dcu(
+    def moe_fused_gate_sqrtsoftplus_hcu(
         gating_output: torch.Tensor,
         correction_bias: torch.Tensor,
         topk: int,
@@ -304,8 +310,8 @@ if _use_lightop_sqrtsoftplus_gate:
         )
 
     direct_register_custom_op(
-        op_name="moe_fused_gate_sqrtsoftplus_dcu",
-        op_func=moe_fused_gate_sqrtsoftplus_dcu,
+        op_name="moe_fused_gate_sqrtsoftplus_hcu",
+        op_func=moe_fused_gate_sqrtsoftplus_hcu,
         mutates_args=[],
         fake_impl=moe_fused_gate_sqrtsoftplus_fake,
     )
@@ -760,8 +766,8 @@ def fused_topk(
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
             )
-        elif _is_dcu and _use_fused_topk_softmax:
-            from lightop import op
+        elif _is_hcu and _use_fused_topk_softmax:
+            from lightop import moe as op
 
             op.topk_softmax(
                 topk_weights,
@@ -1067,7 +1073,7 @@ def biased_topk_lightop_impl(
     assert scoring_func == "sqrtsoftplus"
     assert routed_scaling_factor is not None
 
-    topk_weights, topk_ids = torch.ops.sglang.moe_fused_gate_sqrtsoftplus_dcu(
+    topk_weights, topk_ids = torch.ops.sglang.moe_fused_gate_sqrtsoftplus_hcu(
         gating_output,
         correction_bias,
         topk,
@@ -1382,8 +1388,7 @@ def biased_grouped_topk_gpu(
             apply_routed_scaling_factor_on_output,
         )
     elif _use_lightop:
-        assert not apply_routed_scaling_factor_on_output, "Not implemented"
-        topk_weights, topk_ids = torch.ops.sglang.moe_fused_gate_dcu(
+        topk_weights, topk_ids = torch.ops.sglang.moe_fused_gate_hcu(
             gating_output,
             correction_bias,
             num_expert_group,
@@ -1391,13 +1396,14 @@ def biased_grouped_topk_gpu(
             topk,
             num_fused_shared_experts,
             routed_scaling_factor,
+            apply_routed_scaling_factor_on_output,
         )
-        # if (expert_location_dispatch_info is not None) or (
-        #     num_token_non_padded is not None
-        # ):
-        #     topk_ids = _biased_grouped_topk_postprocess(
-        #         topk_ids, expert_location_dispatch_info, num_token_non_padded
-        #     )
+        if (expert_location_dispatch_info is not None) or (
+            num_token_non_padded is not None
+        ):
+            topk_ids = _biased_grouped_topk_postprocess(
+                topk_ids, expert_location_dispatch_info, num_token_non_padded
+            )
         return topk_weights, topk_ids
     else:
         # Use optimized path for Kimi K2 (384 experts with num_expert_group=1)

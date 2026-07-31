@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +23,8 @@ Tests LRU and FIFO eviction behavior.
 import unittest
 
 from sglang.srt.lora.eviction_policy import get_eviction_policy
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_dcu_ci
-register_dcu_ci(est_time=200, suite="nightly-dcu-core-functional", nightly=True)
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_hcu_ci
+register_hcu_ci(est_time=200, suite="nightly-hcu-core-functional", nightly=True)
 
 
 register_cuda_ci(est_time=200, suite="nightly-1-gpu", nightly=True)

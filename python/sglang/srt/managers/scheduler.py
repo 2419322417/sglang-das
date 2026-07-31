@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +41,11 @@ from torch.cuda import Stream as CudaStream
 from torch.distributed import barrier
 
 from sglang.jit_kernel.ngram_embedding import update_token_table
-from sglang.srt.configs.model_config import ModelConfig, ModelImpl
+from sglang.srt.configs.model_config import (
+    ModelConfig,
+    ModelImpl,
+    get_mtp_index_share_topk,
+)
 from sglang.srt.constants import HEALTH_CHECK_RID_PREFIX
 from sglang.srt.constrained.grammar_manager import GrammarManager
 from sglang.srt.disaggregation.decode import (
@@ -1023,6 +1030,7 @@ class Scheduler(
         )
         from sglang.srt.mem_cache.memory_pool_host import (
             MHATokenToKVPoolHost,
+            MHATokenToKVPoolHostHCU,
             MLATokenToKVPoolHost,
         )
 
@@ -1033,14 +1041,21 @@ class Scheduler(
         # Create host pool for draft with the same slot count as the target host pool,
         # so that host indices stay 1-to-1 between target and draft KV caches.
         primary = self.tree_cache.cache_controller.mem_pool_host
+        layout = self.server_args.hicache_mem_layout
         kw = dict(
             host_to_device_ratio=primary.size / pool.size,
             host_size=0,
             page_size=self.page_size,
-            layout=self.server_args.hicache_mem_layout,
+            layout=layout,
         )
         if isinstance(pool, MHATokenToKVPool):
-            draft_host_pool = MHATokenToKVPoolHost(pool, **kw)
+            # layout_hcu requires HCU host pool (same as hybrid_pool_assembler)
+            cls = (
+                MHATokenToKVPoolHostHCU
+                if layout == "layout_hcu"
+                else MHATokenToKVPoolHost
+            )
+            draft_host_pool = cls(pool, **kw)
         elif isinstance(pool, MLATokenToKVPool):
             draft_host_pool = MLATokenToKVPoolHost(pool, **kw)
         else:
@@ -1206,6 +1221,64 @@ class Scheduler(
             self.server_args.disaggregation_transfer_backend
         )
 
+        # Dedicated Gloo group for epoch-tagged StepInfo/MLPSync all-gather.
+        # Do not mix recv-control or model-forward collectives into it.
+        # A process-group timeout is replica-fatal; no plain-barrier fallback.
+        self.dp_scheduler_cpu_group = None
+        self._dp_scheduler_epoch = 0
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and self.server_args.enable_dp_attention
+        ):
+            if not self.require_mlp_sync:
+                raise RuntimeError("PD Decode DP sync requires require_mlp_sync=True")
+            if self.pp_size != 1:
+                raise RuntimeError(
+                    "PD Decode DP sync currently supports pp_size=1 only"
+                )
+            if self.attn_tp_size != 1 or self.attn_cp_size != 1:
+                raise RuntimeError(
+                    "PD Decode DP sync currently supports attn_tp_size=1 and "
+                    "attn_cp_size=1 only"
+                )
+
+            tp_ranks = list(self.tp_group.ranks)
+            expected_world = (
+                self.server_args.dp_size * self.attn_tp_size * self.attn_cp_size
+            )
+            default_world = torch.distributed.get_world_size()
+            if len(tp_ranks) != expected_world or len(tp_ranks) != default_world:
+                raise RuntimeError(
+                    "PD Decode DP sync topology check failed: "
+                    f"tp_ranks={len(tp_ranks)} expected={expected_world} "
+                    f"default_world={default_world}. "
+                    "Supported only on PP1 DP-attention Decode topology."
+                )
+            expected_ranks = list(range(default_world))
+            if tp_ranks != expected_ranks:
+                raise RuntimeError(
+                    "PD Decode DP sync requires tp_group.ranks to be the ordered "
+                    f"full default world: actual={tp_ranks} "
+                    f"expected={expected_ranks}"
+                )
+
+            from datetime import timedelta
+
+            # Dedicated scheduler-group timeout for PD Decode DP sync.
+            timeout_s = 60.0
+            self.dp_scheduler_cpu_group = torch.distributed.new_group(
+                ranks=tp_ranks,
+                backend="gloo",
+                timeout=timedelta(seconds=timeout_s),
+            )
+            if self.tp_rank == 0:
+                logger.info(
+                    "PD Decode single-clock enabled: dedicated Gloo scheduler "
+                    "group, world=%s timeout=%.1fs",
+                    len(tp_ranks),
+                    timeout_s,
+                )
+
         # todo: should we fix this when enabling mtp or it doesn't matter since we only enable mtp in decode node thus we don't transfer draft kvs between P and D?
         draft_token_to_kv_pool, model_config = self._get_draft_kv_pool()
         # Default to the target model_config so the MetadataBuffers branches
@@ -1213,6 +1286,9 @@ class Scheduler(
         # when this node runs a spec module.
         if model_config is None:
             model_config = self.model_config
+        # This is part of the P/D metadata wire schema, so both sides derive
+        # the width from the same model config.
+        mtp_topk_indices_dim = get_mtp_index_share_topk(model_config.hf_config)
 
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
@@ -1234,6 +1310,7 @@ class Scheduler(
                     else torch.float32
                 ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                mtp_topk_indices_dim=mtp_topk_indices_dim,
             )
 
             # The decode requests polling kv cache
@@ -1245,7 +1322,7 @@ class Scheduler(
                 scheduler=self,
                 tree_cache=self.tree_cache,
             )
-           
+
             # The decode requests pending for pre-allocation
             self.disagg_decode_prealloc_queue = DecodePreallocQueue(
                 req_to_token_pool=self.req_to_token_pool,
@@ -1289,6 +1366,7 @@ class Scheduler(
                     else torch.float32
                 ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
+                mtp_topk_indices_dim=mtp_topk_indices_dim,
             )
 
             self.disagg_prefill_bootstrap_queue = PrefillBootstrapQueue(
@@ -1354,6 +1432,7 @@ class Scheduler(
             self.model_config.context_len,
             self.device,
             self.spec_algorithm,
+            mtp_topk_indices_dim=get_mtp_index_share_topk(self.model_config.hf_config),
         )
         self.batch_record_buf = [None] * 2
         self.batch_record_ct = 0
@@ -1733,12 +1812,15 @@ class Scheduler(
                     src=self.attn_cp_group.ranks[0],
                 )
 
-            # When dp_attention_local_control_broadcast is enabled, each DP
-            # group leader already receives control messages from the DP
-            # controller, so we broadcast within attn_tp_group + attn_cp_group
-            # instead of the full tp_group.  This avoids an expensive
-            # all-ranks gloo sync.
-            _local_ctrl = self.server_args.enable_dp_attention_local_control_broadcast
+            # When local control broadcast is enabled (env preferred; CLI kept
+            # for compatibility), each DP group leader already receives control
+            # messages from the DP controller, so we broadcast within
+            # attn_tp_group + attn_cp_group instead of the full tp_group.
+            # This avoids an expensive all-ranks gloo sync.
+            _local_ctrl = (
+                envs.SGLANG_ENABLE_DP_ATTENTION_LOCAL_CONTROL_BROADCAST.get()
+                or self.server_args.enable_dp_attention_local_control_broadcast
+            )
             if _local_ctrl:
                 if self.attn_tp_size != 1:
                     control_reqs = broadcast_pyobj(

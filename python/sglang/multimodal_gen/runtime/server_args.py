@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
@@ -1661,6 +1664,14 @@ class ServerArgs(DisaggArgsMixin):
             )
 
     def _validate_parallelism(self):
+        if self.use_fsdp_inference and self.tp_size > 1:
+            raise ValueError(
+                "FSDP inference cannot be combined with tensor parallelism. "
+                "FSDP assumes identical parameter replicas across its shard group, "
+                "but TP ranks own different parameter shards. Disable "
+                "--use-fsdp-inference when --tp-size is greater than 1."
+            )
+
         if self.sp_degree > self.num_gpus or self.num_gpus % self.sp_degree != 0:
             raise ValueError(
                 f"num_gpus ({self.num_gpus}) must be >= and divisible by sp_degree ({self.sp_degree})"

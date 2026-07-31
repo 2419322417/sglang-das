@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/moe_wna16.py
@@ -7,7 +10,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
-from sglang.srt.utils import is_dcu
+from sglang.srt.utils import is_hcu
 import torch
 
 from sglang.srt.distributed import get_tensor_model_parallel_rank
@@ -26,7 +29,7 @@ from sglang.srt.layers.quantization.unquant import (
     UnquantizedLinearMethod,
 )
 from sglang.srt.utils import get_device_capability, set_weight_attrs
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +97,7 @@ class MoeWNA16Config(QuantizationConfig):
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
         elif self.linear_quant_method == "awq":
-            if not _is_dcu:
+            if not _is_hcu:
                 capability_tuple = get_device_capability()
                 device_capability = (
                     -1

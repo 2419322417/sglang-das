@@ -198,7 +198,7 @@ class DeepSeekV4SingleKVPool(KVCache):
         cache_k: torch.Tensor,
         eps: float = 1e-8,
     ) -> None:
-        from lightop import op
+        from lightop import kvcache as op
 
         op.quantize_nope_fp8_rope_bf16_pack_store(
             cache_k,

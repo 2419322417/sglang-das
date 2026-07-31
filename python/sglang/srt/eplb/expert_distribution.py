@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -193,6 +196,8 @@ class _ExpertDistributionRecorderReal(ExpertDistributionRecorder):
 
     def _on_forward_pass_end(self, forward_pass_id: int, outputs: Dict[str, Any]):
         if not self._recording:
+            return
+        if torch.get_device_module().is_current_stream_capturing():
             return
         for gatherer_key, gatherer in self._single_pass_gatherers.items():
             single_pass_data = gatherer.collect()

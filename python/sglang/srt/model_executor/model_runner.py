@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,6 +64,8 @@ from sglang.srt.configs.model_config import (
     ModelConfig,
     ModelImpl,
     get_num_indexer_layers,
+    is_deepseek_nsa,
+    nsa_layer_skips_topk,
 )
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
@@ -76,6 +81,7 @@ from sglang.srt.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
     set_custom_all_reduce,
+    set_custom_all_reduce_backend,
     set_mscclpp_all_reduce,
     set_torch_symm_mem_all_reduce,
 )
@@ -148,6 +154,9 @@ from sglang.srt.model_executor.forward_batch_info import (
     PPProxyTensors,
 )
 from sglang.srt.model_executor.hook_manager import register_forward_hooks
+from sglang.srt.model_executor.input_buffers import (
+    get_pp_proxy_hidden_states_shape,
+)
 from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
     ModelRunnerKVCacheMixin,
 )
@@ -244,7 +253,7 @@ MLA_ATTENTION_BACKENDS = [
     "triton",
     "flashmla",
     "cutlass_mla",
-    "dcu_mla",
+    "hcu_mla",
     "trtllm_mla",
     "tokenspeed_mla",
     "ascend",
@@ -255,13 +264,13 @@ MLA_ATTENTION_BACKENDS = [
 CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS = [
     "flashinfer",
     "fa3",
-    "dcu_mla",
+    "hcu_mla",
     "fa4",
     "flashmla",
     "cutlass_mla",
     "trtllm_mla",
     "tokenspeed_mla",
-    "dcu_mla",
+    "hcu_mla",
 ]
 
 TORCH_DTYPE_TO_KV_CACHE_STR = {
@@ -851,6 +860,18 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
         self.model_config.full_attention_layer_ids = full_attention_layer_ids
 
+    def get_pp_proxy_topk_size(self) -> Optional[int]:
+        """Return the top-k width a non-first PP stage must receive, if any."""
+        hf_config = self.model_config.hf_text_config
+        if (
+            self.pp_size <= 1
+            or self.pp_rank == 0
+            or not is_deepseek_nsa(hf_config)
+            or not nsa_layer_skips_topk(hf_config, self.start_layer)
+        ):
+            return None
+        return getattr(hf_config, "index_topk", None)
+
     def init_routed_experts_capturer(self):
         if not self.server_args.disable_shared_experts_fusion and hasattr(
             self.model, "num_fused_shared_experts"
@@ -1236,6 +1257,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.server_args.host or "127.0.0.1", self.dist_port
             ).to_tcp()
         set_custom_all_reduce(not self.server_args.disable_custom_all_reduce)
+        set_custom_all_reduce_backend(self.server_args.custom_all_reduce_backend)
         set_mscclpp_all_reduce(self.server_args.enable_mscclpp)
         set_torch_symm_mem_all_reduce(self.server_args.enable_torch_symm_mem)
 
@@ -2687,6 +2709,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 hidden_size=self.model_config.hidden_size,
                 model_config=self.model_config,
             ),
+            pp_proxy_topk_size=self.get_pp_proxy_topk_size(),
         )
         buffers.num_token_non_padded[...] = num_tokens
 

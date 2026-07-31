@@ -1,16 +1,6 @@
-# Modifications Copyright 2026 Hygon Information Technology Co., Ltd.
-#
-# Hygon modifications to this file are licensed under the Apache License,
-# Version 2.0 (the "License"); you may not use these modifications except
-# in compliance with the License. You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
 
 import argparse
 import glob
@@ -89,7 +79,7 @@ HW_MAPPING = {
     "cuda": HWBackend.CUDA,
     "amd": HWBackend.AMD,
     "npu": HWBackend.NPU,
-    "dcu": HWBackend.DCU,
+    "hcu": HWBackend.HCU,
 }
 
 # Per-commit test suites (run on every PR)
@@ -144,12 +134,12 @@ PER_COMMIT_SUITES = {
         "stage-b-test-4-npu-a3",
         "stage-b-test-16-npu-a3",
     ],
-    HWBackend.DCU: [
-        "stage-a-test-1-gpu-small-dcu",
-        "stage-b-test-1-gpu-small-dcu",
-        "stage-b-test-1-gpu-large-dcu",
-        "stage-b-test-2-gpu-large-dcu",
-        "stage-c-test-large-8-gpu-dcu",
+    HWBackend.HCU: [
+        "stage-a-test-1-hcu-small",
+        "stage-b-test-1-hcu-small",
+        "stage-b-test-1-gpu-large-hcu",
+        "stage-b-test-2-gpu-large-hcu",
+        "stage-c-test-large-8-gpu-hcu",
     ],
 }
 
@@ -201,23 +191,24 @@ NIGHTLY_SUITES = {
         "full-8-npu-a3",
         "full-16-npu-a3",
     ],
-    HWBackend.DCU: [
-        "nightly-dcu",
-        "nightly-dcu-1-gpu",
-        "nightly-dcu-2-gpu",
-        "nightly-dcu-4-gpu",
-        "nightly-dcu-8-gpu",
-        "nightly-dcu-accuracy",
-        "nightly-dcu-perf",
-        "nightly-dcu-vlm",
-        "nightly-dcu-core-functional",
-        "nightly-dcu-accuracy-text",
-        "nightly-dcu-perf-text",
-        "nightly-dcu-large-model-4gpu",
-        "nightly-dcu-large-model-8gpu",
-        "nightly-dcu-quant-opt",
-        "nightly-dcu-functional-long",
-        "nightly-dcu-api-models",
+    HWBackend.HCU: [
+        "nightly-hcu",
+        "nightly-hcu-1-gpu",
+        "nightly-hcu-2-gpu",
+        "nightly-hcu-4-gpu",
+        "nightly-hcu-8-gpu",
+        "nightly-hcu-accuracy",
+        "nightly-hcu-perf",
+        "nightly-hcu-vlm",
+        "nightly-hcu-core-functional",
+        "nightly-hcu-accuracy-text",
+        "nightly-hcu-perf-text",
+        "nightly-hcu-large-model-4gpu",
+        "nightly-hcu-large-model-8gpu",
+        "nightly-hcu-quant-opt",
+        "nightly-hcu-functional-long",
+        "nightly-hcu-api-models",
+        "nightly-hcu-disaggregation-16gpu",
     ],
 }
 

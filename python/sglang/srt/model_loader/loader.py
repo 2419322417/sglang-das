@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.3.post1/vllm/model_executor/model_loader/loader.py
@@ -740,7 +743,7 @@ class DefaultModelLoader(BaseModelLoader):
         # process_weights_after_loading allocates repacked/quantized tensors into
         # (and fragments) that space -- recovers ~10GB/rank of serving headroom.
         # Mirrors the torch.npu.empty_cache() sglang already does for NPU in the
-        # loop below; extended to CUDA/HIP (DCU), which upstream omitted.
+        # loop below; extended to CUDA/HIP (HCU), which upstream omitted.
         #
         # Gated to fst only: it is the sole loader that leaves reserved >> allocated
         # (other loaders stage weights on CPU, reserved ~= allocated), so this is a

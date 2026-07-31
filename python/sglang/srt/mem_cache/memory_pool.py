@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 Copyright 2023-2024 SGLang Team
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,7 +48,6 @@ from sglang.srt.layers.attention.nsa.quant_k_cache import (
     quantize_k_cache,
     quantize_k_cache_separate,
 )
-from sglang.srt.layers.attention.nsa.utils import aiter_can_use_preshuffle_paged_mqa
 from sglang.srt.layers.quantization.fp8_kernel import fp8_dtype, is_fp8_fnuz
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.utils import (
@@ -60,10 +62,10 @@ from sglang.srt.utils import (
     cpu_has_amx_support,
     is_cpu,
     is_cuda,
+    is_hcu,
+    is_hcu_native_fp8_supported,
     is_hip,
     is_npu,
-    is_dcu,
-    is_dcu_native_fp8_supported,
     next_power_of_2,
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
@@ -71,10 +73,10 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
     from sglang.srt.managers.schedule_batch import Req
-    
+
 from sglang.srt.utils import get_bool_env_var
 
-_kv_layout_dcu_fa = get_bool_env_var("SGLANG_KV_LAYOUT_DCU_FA", default="true")
+_kv_layout_hcu_fa = get_bool_env_var("SGLANG_KV_LAYOUT_HCU_FA", default="true")
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +88,8 @@ _cpu_has_amx_support = cpu_has_amx_support()
 _is_hip = is_hip()
 _is_fp8_fnuz = is_fp8_fnuz()
 
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
+
 
 def get_tensor_size_bytes(t: Union[torch.Tensor, List[torch.Tensor]]):
     if isinstance(t, list):
@@ -910,8 +913,8 @@ class MHATokenToKVPool(KVCache):
                 if self.enable_custom_mem_pool
                 else nullcontext()
             ):
-                
-                if _kv_layout_dcu_fa:
+
+                if _kv_layout_hcu_fa:
                     page_num = int((self.size + self.page_size) / self.page_size)
                     self.k_buffer = [
                         torch.zeros(
@@ -943,7 +946,11 @@ class MHATokenToKVPool(KVCache):
                     ]
                     self.v_buffer = [
                         torch.zeros(
-                            (self.size + self.page_size, self.head_num, self.v_head_dim),
+                            (
+                                self.size + self.page_size,
+                                self.head_num,
+                                self.v_head_dim,
+                            ),
                             dtype=self.store_dtype,
                             device=self.device,
                         )
@@ -961,8 +968,8 @@ class MHATokenToKVPool(KVCache):
             device=self.device,
         )
         self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
-        
-        if _kv_layout_dcu_fa:
+
+        if _kv_layout_hcu_fa:
             self.data_strides = torch.tensor(
                 [
                     np.prod(self.head_num * self.v_head_dim) * x.dtype.itemsize
@@ -1012,8 +1019,8 @@ class MHATokenToKVPool(KVCache):
             self._get_value_buffer(i).nbytes
             for i in range(self.start_layer, self.start_layer + self.layer_num)
         ]
-        
-        if _kv_layout_dcu_fa:
+
+        if _kv_layout_hcu_fa:
             kv_item_lens = [
                 self._get_key_buffer(i)[0].nbytes
                 for i in range(self.start_layer, self.start_layer + self.layer_num)
@@ -1039,7 +1046,7 @@ class MHATokenToKVPool(KVCache):
             kv_cache_cpu.append([])
             for i in range(0, len(indices), chunk_size):
                 chunk_indices = indices[i : i + chunk_size]
-                if _kv_layout_dcu_fa:
+                if _kv_layout_hcu_fa:
                     page_idxs = chunk_indices // 64
                     offsets = chunk_indices % 64
                     k_chunk = self.k_buffer[layer_id][page_idxs, :, offsets, :]
@@ -1047,7 +1054,7 @@ class MHATokenToKVPool(KVCache):
                 else:
                     k_chunk = self.k_buffer[layer_id][chunk_indices]
                     v_chunk = self.v_buffer[layer_id][chunk_indices]
-                
+
                 k_cpu = k_chunk.to("cpu", non_blocking=True)
                 v_cpu = v_chunk.to("cpu", non_blocking=True)
                 kv_cache_cpu[-1].append([k_cpu, v_cpu])
@@ -1074,11 +1081,11 @@ class MHATokenToKVPool(KVCache):
                 assert k_cpu.shape[0] == v_cpu.shape[0] == len(chunk_indices)
                 k_chunk = k_cpu.to(self.k_buffer[0].device, non_blocking=True)
                 v_chunk = v_cpu.to(self.v_buffer[0].device, non_blocking=True)
-                if _kv_layout_dcu_fa:
+                if _kv_layout_hcu_fa:
                     page_idxs = chunk_indices // 64
                     offsets = chunk_indices % 64
-                    self.k_buffer[layer_id][page_idxs,:,offsets,:] = k_chunk
-                    self.v_buffer[layer_id][page_idxs,:,:,offsets] = v_chunk
+                    self.k_buffer[layer_id][page_idxs, :, offsets, :] = k_chunk
+                    self.v_buffer[layer_id][page_idxs, :, :, offsets] = v_chunk
                 else:
                     self.k_buffer[layer_id][chunk_indices] = k_chunk
                     self.v_buffer[layer_id][chunk_indices] = v_chunk
@@ -1123,6 +1130,7 @@ class MHATokenToKVPool(KVCache):
         layer_id_override: Optional[int] = None,
     ):
         from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
         if layer_id_override is not None:
             layer_id = layer_id_override
         else:
@@ -1139,20 +1147,28 @@ class MHATokenToKVPool(KVCache):
             cache_k = cache_k.view(self.store_dtype)
             cache_v = cache_v.view(self.store_dtype)
 
-        if _kv_layout_dcu_fa:
+        if _kv_layout_hcu_fa:
             page_idxs = loc // 64
             offsets = loc % 64
             if get_is_capture_mode() and self.alt_stream is not None:
                 # Overlap the copy of K and V cache for small batch size
                 current_stream = self.device_module.current_stream()
                 self.alt_stream.wait_stream(current_stream)
-                self.k_buffer[layer_id - self.start_layer][page_idxs,:,offsets,:] = cache_k
+                self.k_buffer[layer_id - self.start_layer][
+                    page_idxs, :, offsets, :
+                ] = cache_k
                 with self.device_module.stream(self.alt_stream):
-                    self.v_buffer[layer_id - self.start_layer][page_idxs,:,:,offsets] = cache_v
+                    self.v_buffer[layer_id - self.start_layer][
+                        page_idxs, :, :, offsets
+                    ] = cache_v
                 current_stream.wait_stream(self.alt_stream)
             else:
-                self.k_buffer[layer_id - self.start_layer][page_idxs,:,offsets,:] = cache_k
-                self.v_buffer[layer_id - self.start_layer][page_idxs,:,:,offsets] = cache_v
+                self.k_buffer[layer_id - self.start_layer][
+                    page_idxs, :, offsets, :
+                ] = cache_k
+                self.v_buffer[layer_id - self.start_layer][
+                    page_idxs, :, :, offsets
+                ] = cache_v
         else:
             _set_kv_buffer_impl(
                 cache_k,
@@ -1804,7 +1820,9 @@ class MLATokenToKVPool(KVCache):
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
 
         if self.store_dtype != self.dtype and self.dtype not in (
-            torch.float8_e5m2, torch.float8_e4m3fn):
+            torch.float8_e5m2,
+            torch.float8_e4m3fn,
+        ):
             return self.kv_buffer[layer_id - self.start_layer].view(self.dtype)
         return self.kv_buffer[layer_id - self.start_layer], self.dtype
 
@@ -1839,7 +1857,7 @@ class MLATokenToKVPool(KVCache):
             )
         else:
             self.kv_buffer[layer_id - self.start_layer][loc] = cache_k
-    
+
     def set_kv_buffer_opt(  # TODO: handwrite kernel
         self,
         layer: RadixAttention,
@@ -1849,7 +1867,7 @@ class MLATokenToKVPool(KVCache):
     ):
         layer_id = layer.layer_id
         assert not (self.use_nsa and self.nsa_kv_cache_store_fp8)
-        cache_k = torch.cat([cache_k_nope, cache_k_rope],dim=-1)
+        cache_k = torch.cat([cache_k_nope, cache_k_rope], dim=-1)
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
         if self.store_dtype != self.dtype:
@@ -1858,7 +1876,6 @@ class MLATokenToKVPool(KVCache):
             )
         else:
             self.kv_buffer[layer_id - self.start_layer][loc] = cache_k
-        
 
     def set_mla_kv_buffer(
         self,
@@ -1869,7 +1886,7 @@ class MLATokenToKVPool(KVCache):
     ):
         layer_id = layer.layer_id
 
-        if _is_hip and not _is_dcu and self.use_nsa and self.dtype == fp8_dtype:
+        if _is_hip and not _is_hcu and self.use_nsa and self.dtype == fp8_dtype:
             # HIP FP8 path uses raw MLA KV layout (nope + rope) without per-block scales.
             # Fuse BF16/FP16 -> FP8 cast with paged KV write.
             set_mla_kv_buffer_triton_fp8_quant(
@@ -1880,12 +1897,13 @@ class MLATokenToKVPool(KVCache):
                 fp8_dtype,
             )
         elif self.nsa_kv_cache_store_fp8:
-            if _is_dcu:
-                from lightop import op
+            if _is_hcu:
+                from lightop import kvcache as op
+
                 op.fused_quantize_and_store_mla_kv_cache(
-                    cache_k_nope, 
-                    cache_k_rope, 
-                    self.kv_buffer[layer_id - self.start_layer], 
+                    cache_k_nope,
+                    cache_k_rope,
+                    self.kv_buffer[layer_id - self.start_layer],
                     loc,
                     "fp8_e4m3",
                     1e-6,
@@ -1901,19 +1919,34 @@ class MLATokenToKVPool(KVCache):
                     cache_k_rope_fp8,
                 )
         else:
-            if cache_k_nope.dtype != self.dtype:
-                cache_k_nope = cache_k_nope.to(self.dtype)
-                cache_k_rope = cache_k_rope.to(self.dtype)
-            if self.store_dtype != self.dtype:
-                cache_k_nope = cache_k_nope.view(self.store_dtype)
-                cache_k_rope = cache_k_rope.view(self.store_dtype)
+            if _is_hcu:
+                from lightop import kvcache as op
 
-            set_mla_kv_buffer_triton(
-                self.kv_buffer[layer_id - self.start_layer],
-                loc,
-                cache_k_nope,
-                cache_k_rope,
-            )
+                if self.dtype == torch.float8_e5m2:
+                    fp8_dtype_str = "fp8_e5m2"
+                else:
+                    fp8_dtype_str = "fp8_e4m3"
+                op.fused_concat_and_store_mla_kv_cache(
+                    cache_k_nope,
+                    cache_k_rope,
+                    self.kv_buffer[layer_id - self.start_layer],
+                    loc,
+                    fp8_dtype_str,
+                )
+            else:
+                if cache_k_nope.dtype != self.dtype:
+                    cache_k_nope = cache_k_nope.to(self.dtype)
+                    cache_k_rope = cache_k_rope.to(self.dtype)
+                if self.store_dtype != self.dtype:
+                    cache_k_nope = cache_k_nope.view(self.store_dtype)
+                    cache_k_rope = cache_k_rope.view(self.store_dtype)
+
+                set_mla_kv_buffer_triton(
+                    self.kv_buffer[layer_id - self.start_layer],
+                    loc,
+                    cache_k_nope,
+                    cache_k_rope,
+                )
 
     def get_mla_kv_buffer(
         self,
@@ -2142,18 +2175,22 @@ class NSATokenToKVPool(MLATokenToKVPool):
             index_buf_size = size
         # num head == 1 and head dim == 128 for index_k in NSA
         assert index_head_dim == 128
-        if _is_dcu:
-            self.use_fp8_index_k_cache = dtype in (
-                torch.float8_e4m3fn,
-                torch.float8_e5m2,
-            ) and is_dcu_native_fp8_supported()
+        if _is_hcu:
+            self.use_fp8_index_k_cache = (
+                dtype
+                in (
+                    torch.float8_e4m3fn,
+                    torch.float8_e5m2,
+                )
+                and is_hcu_native_fp8_supported()
+            )
         else:
             self.use_fp8_index_k_cache = True
         self.index_k_buffer_dtype = (
-            torch.bfloat16 if _is_dcu and not self.use_fp8_index_k_cache else self.dtype
+            torch.bfloat16 if _is_hcu and not self.use_fp8_index_k_cache else self.dtype
         )
 
-        if _is_hip and not _is_dcu: #and  not _is_dcu:nhb
+        if _is_hip and not _is_hcu:  # and  not _is_hcu:nhb
             assert self.page_size == 1
         else:
             assert self.page_size == 64
@@ -2295,13 +2332,13 @@ class NSATokenToKVPool(MLATokenToKVPool):
             pool=self, buf=buf, loc=loc, index_k=index_k, index_k_scale=index_k_scale
         )
 
-    def get_cpu_copy(self, indices):
+    def get_cpu_copy(self, indices, mamba_indices=None):
         # NSA keeps a page-indexed indexer cache alongside kv_buffer.
         # Retract frees the slots/pages and they get reused by other reqs'
         # indexer cache writes, so we must offload it here too -- otherwise
         # resume restores kv_buffer but leaves foreign index/scale in place and
         # NSA attention reads garbage at those token positions.
-        kv_cache_cpu = super().get_cpu_copy(indices)
+        kv_cache_cpu = super().get_cpu_copy(indices, mamba_indices=mamba_indices)
         index_k_cache = (
             self.index_k_with_scale_buffer
             if self.use_fp8_index_k_cache
@@ -2325,8 +2362,10 @@ class NSATokenToKVPool(MLATokenToKVPool):
 
         return {"kv": kv_cache_cpu, "index_k": index_k_cpu}
 
-    def load_cpu_copy(self, kv_cache_cpu_dict, indices):
-        super().load_cpu_copy(kv_cache_cpu_dict["kv"], indices)
+    def load_cpu_copy(self, kv_cache_cpu_dict, indices, mamba_indices=None):
+        super().load_cpu_copy(
+            kv_cache_cpu_dict["kv"], indices, mamba_indices=mamba_indices
+        )
 
         page_indices = indices[:: self.page_size] // self.page_size
         index_k_cpu = kv_cache_cpu_dict["index_k"]
@@ -2343,9 +2382,7 @@ class NSATokenToKVPool(MLATokenToKVPool):
                 chunk_page_indices = page_indices[i : i + page_chunk_size]
                 idx_cpu = index_k_cpu[layer_id][i // page_chunk_size]
                 assert idx_cpu.shape[0] == len(chunk_page_indices)
-                idx_chunk = idx_cpu.to(
-                    index_k_cache[0].device, non_blocking=True
-                )
+                idx_chunk = idx_cpu.to(index_k_cache[0].device, non_blocking=True)
                 index_k_cache[layer_id][chunk_page_indices] = idx_chunk
         torch.cuda.synchronize()
 

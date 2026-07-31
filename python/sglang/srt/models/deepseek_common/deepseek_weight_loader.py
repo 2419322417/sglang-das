@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2026 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,7 +53,7 @@ from sglang.srt.model_loader.weight_utils import (
 )
 from sglang.srt.models.deepseek_common.utils import (
     _is_cuda,
-    _is_dcu,
+    _is_hcu,
     _is_fp8_fnuz,
     _is_hip,
     _is_musa,
@@ -583,7 +586,7 @@ class DeepseekV2WeightLoaderMixin:
 
             if not use_deep_gemm_bmm:
                 if (
-                    _is_dcu
+                    _is_hcu
                     and w.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
                     and not (
                         _use_aiter_gfx95

@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import dataclasses
 from dataclasses import field
 from typing import Any
@@ -11,7 +15,7 @@ class LTX2SamplingParams(SamplingParams):
 
     # Match the reference defaults used by ltx-pipelines (one-stage).
     # See: LTX-2/packages/ltx-pipelines/src/ltx_pipelines/utils/constants.py
-    seed: int = 10
+    seed: int = field(default=10, metadata={"batch_sig_exclude": True})
     generator_device: str = "cpu"
 
     # Video parameters
@@ -47,7 +51,7 @@ class LTX2SamplingParams(SamplingParams):
 class LTX23SamplingParams(LTX2SamplingParams):
     """Sampling parameters matching official LTX-2.3 one-stage defaults."""
 
-    seed: int = 42
+    seed: int = field(default=42, metadata={"batch_sig_exclude": True})
     generator_device: str = "cuda"
     guidance_scale: float = 3.0
     num_inference_steps: int = 30

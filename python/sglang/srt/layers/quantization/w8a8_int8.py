@@ -38,13 +38,13 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
 # from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
-from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+from lightop.quant import per_token_quant_int8
+from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod, UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
     is_cpu,
     is_cuda,
-    is_dcu,
+    is_hcu,
     is_host_cpu_arm64,
     set_weight_attrs,
     use_intel_amx_backend,
@@ -53,10 +53,10 @@ from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
-from lmslim import quant_ops
+from lightop import gemm_ops as quant_ops
 
 _is_cuda = is_cuda()
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
 _is_cpu_arm64 = is_host_cpu_arm64()
@@ -127,15 +127,30 @@ class W8A8Int8Config(QuantizationConfig):
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
-
-        if should_ignore_layer(
-            prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
-        ):
-            return UnquantizedLinearMethod()
+        from sglang.srt.layers.radix_attention import RadixAttention
+        from sglang.srt.layers.quantization.fp8 import Fp8KVCacheMethod
+        from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
         if isinstance(layer, LinearBase):
+            if should_ignore_layer(
+                prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+            ):
+                return UnquantizedEmbeddingMethod()
             return W8A8Int8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
+            if should_ignore_layer(
+                prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+            ):
+                return UnquantizedFusedMoEMethod(
+                    layer.use_triton_kernels, layer.use_flashinfer_trtllm_moe
+                )
             return W8A8Int8MoEMethod(self)
+        elif isinstance(layer, RadixAttention):
+            if should_ignore_layer(
+                prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+            ):
+                return None
+            else:
+                return Fp8KVCacheMethod(self)
         return None
 
     def is_layer_skipped(
@@ -333,7 +348,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if _is_dcu and self.runner.runner_backend.is_lightop():
+        if _is_hcu and self.runner.runner_backend.is_lightop():
             from sglang.srt.layers.moe.moe_runner.lightop import (
                 process_weights_after_loading_lightop,
             )
@@ -360,9 +375,9 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         if moe_runner_backend.is_auto():
             moe_runner_backend = MoeRunnerBackend.TRITON
 
-        if moe_runner_backend.is_aiter() and _is_dcu:
+        if moe_runner_backend.is_aiter() and _is_hcu:
             self.runner = MoeRunner(MoeRunnerBackend.AITER, moe_runner_config)
-        elif moe_runner_backend.is_lightop() and _is_dcu:
+        elif moe_runner_backend.is_lightop() and _is_hcu:
             self.runner = MoeRunner(MoeRunnerBackend.LIGHTOP, moe_runner_config)
         elif moe_runner_backend.is_triton():
             self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
@@ -421,13 +436,13 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
 
         quant_info = self.get_triton_quant_info(layer)
 
-        if _is_dcu and self.runner.runner_backend.is_aiter():
+        if _is_hcu and self.runner.runner_backend.is_aiter():
             from sglang.srt.layers.moe.moe_runner.aiter import (
                 get_aiter_w8a8_int8_quant_info,
             )
 
             quant_info = get_aiter_w8a8_int8_quant_info(layer)
-        elif _is_dcu and self.runner.runner_backend.is_lightop():
+        elif _is_hcu and self.runner.runner_backend.is_lightop():
             from sglang.srt.layers.moe.moe_runner.lightop import get_lightop_quant_info
 
             quant_info = get_lightop_quant_info(layer)

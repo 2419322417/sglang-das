@@ -1,7 +1,9 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_dcu_ci
-register_dcu_ci(est_time=25, suite="stage-b-test-1-gpu-small-dcu")
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_hcu_ci
+register_hcu_ci(est_time=25, suite="stage-b-test-1-hcu-small")
 
 
 register_cuda_ci(est_time=11, stage="stage-b", runner_config="1-gpu-small")

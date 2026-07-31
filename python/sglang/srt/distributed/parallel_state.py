@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/parallel_state.py
@@ -47,13 +50,14 @@ from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cud
 from sglang.srt.distributed.utils import set_global_tcp_store
 from sglang.srt.environ import envs
 from sglang.srt.utils import (
+    get_bool_env_var,
     get_current_device_stream_fast,
     get_int_env_var,
     is_cpu,
     is_cuda_alike,
+    is_hcu,
     is_hip,
     is_musa,
-    is_dcu,
     is_npu,
     is_shm_available,
     is_xpu,
@@ -61,17 +65,19 @@ from sglang.srt.utils import (
 from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.network import get_local_ip_auto
 
-from sglang.srt.utils import get_bool_env_var
 _use_fused_reshape_to_float = get_bool_env_var("SGLANG_USE_FUSED_RESHAPE_TO_FLOAT")
 
 _is_npu = is_npu()
 _is_cpu = is_cpu()
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 _is_xpu = is_xpu()
 _is_musa = is_musa()
 use_quick_custom_allreduce = get_bool_env_var(
     "SGLANG_USE_QUICK_CUSTOM_ALLREDUCE", default="false"
 )
+_ATTN_TP_USE_AITER_CUSTOM_COMM = get_bool_env_var(
+    "SGLANG_ENABLE_ATTN_TP_USE_AITER_CUSTOM_COMM"
+)  # all_reduce reduce_scatter all_gather
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
@@ -233,6 +239,8 @@ class GroupCoordinator:
     use_pynccl: bool  # a hint of whether to use PyNccl
     use_pymscclpp: bool  # a hint of whether to use PyMsccl
     use_custom_allreduce: bool  # a hint of whether to use CustomAllreduce
+    # Selected custom all-reduce backend: auto | native | aiter | off.
+    custom_all_reduce_backend: str
     use_torch_symm_mem_all_reduce: (
         bool  # a hint of whether to use TorchSymmMemAllReduce
     )
@@ -261,6 +269,7 @@ class GroupCoordinator:
         group_name: Optional[str] = None,
         gloo_timeout: timedelta = timedelta(seconds=120 * 60),
         recovered_rank: bool = False,
+        custom_all_reduce_backend: str = "auto",
     ):
         # Set group info
         group_name = group_name or "anonymous"
@@ -337,6 +346,7 @@ class GroupCoordinator:
         self.use_pynccl = use_pynccl
         self.use_pymscclpp = use_pymscclpp
         self.use_custom_allreduce = use_custom_allreduce
+        self.custom_all_reduce_backend = custom_all_reduce_backend
         self.use_torch_symm_mem_all_reduce = use_torch_symm_mem_all_reduce
         self.use_hpu_communicator = use_hpu_communicator
         self.use_xpu_communicator = use_xpu_communicator
@@ -345,7 +355,7 @@ class GroupCoordinator:
 
         # Lazy import to avoid documentation build error
         from sglang.srt.distributed.device_communicators.custom_all_reduce import (
-            dispatch_custom_allreduce
+            dispatch_custom_allreduce,
         )
         from sglang.srt.distributed.device_communicators.pymscclpp import (
             PyMscclppCommunicator,
@@ -389,20 +399,57 @@ class GroupCoordinator:
 
         self.ca_comm: Optional[Any] = None
         self.qr_comm: Optional[QuickAllReduce] = None
-        if use_custom_allreduce and self.world_size > 1:
+        ca_backend = self.custom_all_reduce_backend
+        aiter_transport_env = os.getenv("AITER_AR_TRANSPORT", "ipc").lower()
+        if use_custom_allreduce and self.world_size > 1 and ca_backend != "off":
             # Initialize a custom fast all-reduce implementation.
             try:
-                CAClass = dispatch_custom_allreduce()
-                self.ca_comm = CAClass(
-                    group=self.cpu_group,
-                    device=self.device,
-                )
+                CAClass = dispatch_custom_allreduce(backend=ca_backend)
+                if CAClass is not None:
+                    self.ca_comm = CAClass(
+                        group=self.cpu_group,
+                        device=self.device,
+                    )
             except Exception as e:
-                logger.warning(
-                    f"Setup Custom allreduce failed with {e}. To silence this "
-                    "warning, specify --disable-custom-all-reduce explicitly."
+                strict_fabric = (
+                    ca_backend == "aiter" and aiter_transport_env == "fabric"
                 )
-            if is_hip() and use_quick_custom_allreduce:
+                if strict_fabric:
+                    logger.error(
+                        "[AR] Strict Fabric init failed on TP group ranks=%s: %s",
+                        self.ranks,
+                        e,
+                    )
+                    raise
+                logger.warning(
+                    f"Setup Custom allreduce failed with {e} "
+                    f"(backend={ca_backend}, transport={aiter_transport_env}). "
+                    "Falling back to RCCL/PyNccl. To silence this warning, "
+                    "specify --disable-custom-all-reduce explicitly."
+                )
+                self.ca_comm = None
+
+            # doc §6.4 item 6: aiter+fabric silently landing on disabled=True
+            # is treated as a strict-Fabric failure.
+            if (
+                self.ca_comm is not None
+                and ca_backend == "aiter"
+                and aiter_transport_env == "fabric"
+                and getattr(self.ca_comm, "disabled", False)
+            ):
+                raise RuntimeError(
+                    f"[AR] Strict Fabric requested but aiter CA is disabled "
+                    f"(ranks={self.ranks}). AITER_AR_TRANSPORT=fabric must not "
+                    "silently degrade to RCCL."
+                )
+
+            # doc §6.5: QuickAllReduce is IPC-only. When aiter is going to run
+            # over Fabric/auto, don't let QR construct alongside it.
+            suppress_qr = (
+                ca_backend in ("aiter", "auto")
+                and aiter_transport_env in ("fabric", "auto")
+            )
+            if is_hip() and use_quick_custom_allreduce and not suppress_qr:
                 try:
                     # Initialize a custom quick all-reduce implementation for AMD
                     # when rocm >= gfx942. Quick reduce is designed as a
@@ -414,8 +461,47 @@ class GroupCoordinator:
                         )
                 except Exception as e:
                     logger.warning(f"Failed to initialize QuickAllReduce: {e}")
+
+            # doc §6.4 item 6 / §7.5: canonical startup log — must be greppable
+            # per-rank so operators can prove Fabric was actually selected.
+            requested_transport = (
+                aiter_transport_env if ca_backend in ("aiter", "auto") else "n/a"
+            )
+            selected_transport = (
+                getattr(self.ca_comm, "transport", "n/a")
+                if self.ca_comm is not None
+                else "n/a"
+            )
+            disabled = (
+                True
+                if self.ca_comm is None
+                else bool(getattr(self.ca_comm, "disabled", True))
+            )
+            logger.info(
+                "[AR] custom_all_reduce_backend=%s requested_transport=%s "
+                "selected_transport=%s disabled=%s tp_ranks=%s world_size=%s",
+                ca_backend,
+                requested_transport,
+                selected_transport,
+                disabled,
+                self.ranks,
+                self.world_size,
+            )
+            if (
+                ca_backend == "aiter"
+                and requested_transport == "fabric"
+                and selected_transport != "fabric"
+            ):
+                logger.error(
+                    "[AR] Requested transport=fabric but selected=%s. "
+                    "This should not happen under strict-Fabric semantics.",
+                    selected_transport,
+                )
         elif self.world_size > 1 and is_hip():
-            logger.info("[AR] All-reduce call path: NCCL (custom AR disabled)")
+            logger.info(
+                "[AR] All-reduce call path: NCCL (custom AR disabled, backend=%s)",
+                ca_backend,
+            )
 
         self.torch_symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
         if self.use_torch_symm_mem_all_reduce and self.world_size > 1:
@@ -744,6 +830,21 @@ class GroupCoordinator:
         output: torch.Tensor,
         input: torch.Tensor,
     ) -> torch.Tensor:
+        if _ATTN_TP_USE_AITER_CUSTOM_COMM:
+            ca_comm = self.ca_comm
+            if (
+                ca_comm is not None
+                and not ca_comm.disabled
+                and ca_comm.should_custom_ar(input)
+            ):
+                if ca_comm._IS_CAPTURING:
+                    if torch.cuda.is_current_stream_capturing():
+                        ca_comm.reduce_scatter(input, output, registered=True)
+                        return output
+                else:
+                    ca_comm.reduce_scatter(input, output, registered=False)
+                    return output
+
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and (
             not pynccl_comm.disabled or self.is_symmetric_memory_enabled()
@@ -758,6 +859,24 @@ class GroupCoordinator:
                 output, input, group=self.device_group
             )
         return output
+
+    def _all_to_all_single(
+        self,
+        output: torch.Tensor,
+        input: torch.Tensor,
+    ) -> torch.Tensor:
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            with pynccl_comm.change_state(enable=True, stream=get_current_device_stream_fast()):
+                pynccl_comm.all_to_all_single(output, input)
+        else:
+            torch.distributed.all_to_all_single(output, input, group=self.device_group)
+        return output
+
+    def all_to_all_single(
+        self, output: torch.Tensor, input: torch.Tensor
+    ) -> torch.Tensor:
+        return self._all_to_all_single(output, input)
 
     def reduce_scatter_tensor(self, output: torch.Tensor, input: torch.Tensor):
         if _is_npu:
@@ -808,6 +927,24 @@ class GroupCoordinator:
             return output
 
     def _all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
+        if _ATTN_TP_USE_AITER_CUSTOM_COMM:
+            ca_comm = self.ca_comm
+            # Only use aiter all_gather for small tensors (decode); prefill
+            # performance is worse than NCCL for large tensors.
+            if (
+                ca_comm is not None
+                and not ca_comm.disabled
+                and ca_comm.should_custom_ag(input)
+                and input.numel() <= 256 * 6144  # ~3 MB, typical decode batch
+            ):
+                if ca_comm._IS_CAPTURING:
+                    if torch.cuda.is_current_stream_capturing():
+                        ca_comm.all_gather_reg(input, out=output)
+                        return
+                else:
+                    ca_comm.all_gather_unreg(input, out=output)
+                    return
+
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and (
             not pynccl_comm.disabled or self.is_symmetric_memory_enabled()
@@ -913,13 +1050,20 @@ class GroupCoordinator:
         output_tensor = output_tensor.reshape((world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
 
-        if _is_dcu and _use_fused_reshape_to_float:
-            from lightop import op
-            vocab_size = input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+        if _is_hcu and _use_fused_reshape_to_float:
+            from lightop import tensor as op
+
+            vocab_size = (
+                input_size[:dim]
+                + (world_size * input_size[dim],)
+                + input_size[dim + 1 :]
+            )
             output_tensor = op.reshape_to_float(output_tensor, vocab_size[1])
         else:
             output_tensor = output_tensor.reshape(
-                input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+                input_size[:dim]
+                + (world_size * input_size[dim],)
+                + input_size[dim + 1 :]
             )
         return output_tensor
 
@@ -1431,6 +1575,7 @@ def init_world_group(
         use_npu_communicator=False,
         group_name="world",
         recovered_rank=recovered_rank,
+        custom_all_reduce_backend="off",
     )
 
 
@@ -1445,6 +1590,7 @@ def init_model_parallel_group(
     use_mscclpp_allreduce: Optional[bool] = None,
     use_torch_symm_mem_allreduce: Optional[bool] = None,
     recovered_rank: bool = False,
+    custom_all_reduce_backend: Optional[str] = None,
 ) -> GroupCoordinator:
     if use_custom_allreduce is None:
         use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
@@ -1452,6 +1598,8 @@ def init_model_parallel_group(
         use_mscclpp_allreduce = _ENABLE_MSCCLPP_ALL_REDUCE
     if use_torch_symm_mem_allreduce is None:
         use_torch_symm_mem_allreduce = _ENABLE_TORCH_SYMM_MEM_ALL_REDUCE
+    if custom_all_reduce_backend is None:
+        custom_all_reduce_backend = _CUSTOM_ALL_REDUCE_BACKEND
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
@@ -1470,6 +1618,7 @@ def init_model_parallel_group(
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
         recovered_rank=recovered_rank,
+        custom_all_reduce_backend=custom_all_reduce_backend,
     )
 
 
@@ -1592,11 +1741,21 @@ logger = logging.getLogger(__name__)
 _ENABLE_CUSTOM_ALL_REDUCE = True
 _ENABLE_MSCCLPP_ALL_REDUCE = False
 _ENABLE_TORCH_SYMM_MEM_ALL_REDUCE = False
+_CUSTOM_ALL_REDUCE_BACKEND: str = "auto"
 
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def set_custom_all_reduce_backend(backend: str) -> None:
+    global _CUSTOM_ALL_REDUCE_BACKEND
+    _CUSTOM_ALL_REDUCE_BACKEND = backend
+
+
+def get_custom_all_reduce_backend() -> str:
+    return _CUSTOM_ALL_REDUCE_BACKEND
 
 
 def set_mscclpp_all_reduce(enable: bool):
@@ -1939,11 +2098,12 @@ def initialize_model_parallel(
             backend,
             use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP or enable_symm_mem,
             use_mscclpp_allreduce=False,
-            use_custom_allreduce=False,
+            use_custom_allreduce=None if _ATTN_TP_USE_AITER_CUSTOM_COMM else False,
             use_torch_symm_mem_allreduce=False,
             use_message_queue_broadcaster=envs.SGLANG_USE_MESSAGE_QUEUE_BROADCASTER.get(),
             group_name="attention_tp",
             recovered_rank=recovered_rank,
+            custom_all_reduce_backend="off",
         )
 
     moe_ep_size = expert_model_parallel_size
@@ -2002,6 +2162,7 @@ def initialize_model_parallel(
             use_custom_allreduce=False,
             group_name="moe_ep",
             recovered_rank=recovered_rank,
+            custom_all_reduce_backend="off",
         )
 
     global _MOE_TP
@@ -2030,6 +2191,7 @@ def initialize_model_parallel(
             use_custom_allreduce=False,
             group_name="moe_tp",
             recovered_rank=recovered_rank,
+            custom_all_reduce_backend="off",
         )
 
     # Build the pipeline model-parallel groups.
@@ -2050,6 +2212,7 @@ def initialize_model_parallel(
         use_custom_allreduce=False,
         group_name="pp",
         recovered_rank=recovered_rank,
+        custom_all_reduce_backend="off",
     )
 
 

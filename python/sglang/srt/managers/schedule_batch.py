@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 from __future__ import annotations
 
 from sglang.srt.dllm.config import DllmConfig
@@ -818,6 +821,7 @@ class Req(ReqDllmMixin):
         self.hidden_states_tensor = None  # Note: use tensor instead of list to transfer hidden_states when PD + MTP
         self.output_topk_p = None
         self.output_topk_index = None
+        self.mtp_topk_indices_tensor = None
 
         # capture routed experts
         self.return_routed_experts = return_routed_experts
@@ -1734,22 +1738,32 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         ]
 
         _pin = is_pin_memory_available(self.device)
-        input_ids_tensor = torch.tensor(
-            list(chain.from_iterable(input_ids)), dtype=torch.int64, pin_memory=_pin
-        ).pin_memory().to(self.device, non_blocking=True)
+        input_ids_tensor = (
+            torch.tensor(
+                list(chain.from_iterable(input_ids)), dtype=torch.int64, pin_memory=_pin
+            )
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
         seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int64, pin_memory=_pin).to(
             self.device, non_blocking=True
         )
         seq_lens_cpu = torch.tensor(seq_lens, dtype=torch.int64)
-        orig_seq_lens_tensor = torch.tensor(
-            orig_seq_lens, dtype=torch.int32, pin_memory=_pin
-        ).pin_memory().to(self.device, non_blocking=True)
+        orig_seq_lens_tensor = (
+            torch.tensor(orig_seq_lens, dtype=torch.int32, pin_memory=_pin)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
+        )
 
         token_type_ids_tensor = None
         if len(token_type_ids) > 0:
-            token_type_ids_tensor = torch.tensor(
-                sum(token_type_ids, []), dtype=torch.int64, pin_memory=_pin
-            ).pin_memory().to(self.device, non_blocking=True)
+            token_type_ids_tensor = (
+                torch.tensor(
+                    sum(token_type_ids, []), dtype=torch.int64, pin_memory=_pin
+                )
+                .pin_memory()
+                .to(self.device, non_blocking=True)
+            )
 
         # Set batch fields needed by alloc_for_extend
         self.prefix_lens = prefix_lens
@@ -1757,7 +1771,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.seq_lens = seq_lens_tensor
         self.seq_lens_cpu = seq_lens_cpu
         self.extend_num_tokens = extend_num_tokens
-        self.loc_tensor = torch.tensor([-1], device=self.device) 
+        self.loc_tensor = torch.tensor([-1], device=self.device)
 
         # Allocate memory
         out_cache_loc, req_pool_indices_tensor, req_pool_indices = alloc_for_extend(
@@ -1927,9 +1941,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.orig_seq_lens = orig_seq_lens_tensor
         self.out_cache_loc = out_cache_loc
         self.input_embeds = (
-            torch.tensor(input_embeds, pin_memory=_pin).pin_memory().to(
-                self.device, non_blocking=True
-            )
+            torch.tensor(input_embeds, pin_memory=_pin)
+            .pin_memory()
+            .to(self.device, non_blocking=True)
             if input_embeds
             else None
         )

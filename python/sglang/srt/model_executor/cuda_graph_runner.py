@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -175,6 +178,8 @@ class DecodeInputBuffers(ForwardInputBuffers):
         ne_token_table: Optional[torch.Tensor] = None,
         is_hybrid_swa: bool = False,
         hc_hidden_size: Optional[int] = None,
+        pp_proxy_hidden_states_shape: Optional[Tuple[int, ...]] = None,
+        pp_proxy_topk_size: Optional[int] = None,
     ) -> "DecodeInputBuffers":
         with torch.device(device):
             input_ids = torch.zeros((max_num_token,), dtype=torch.int64)
@@ -212,11 +217,17 @@ class DecodeInputBuffers(ForwardInputBuffers):
                 is_mhc = hc_hidden_size is not None
                 hs = hc_hidden_size if is_mhc else hidden_size
                 pp_proxy_tensors = {
-                    "hidden_states": torch.zeros((max_bs, hs), dtype=dtype),
+                    "hidden_states": torch.zeros(
+                        pp_proxy_hidden_states_shape or (max_bs, hs), dtype=dtype
+                    ),
                 }
                 if not is_mhc:
                     pp_proxy_tensors["residual"] = torch.zeros(
                         (max_bs, hidden_size), dtype=dtype
+                    )
+                if pp_proxy_topk_size is not None:
+                    pp_proxy_tensors["topk_indices"] = torch.zeros(
+                        (max_num_token, pp_proxy_topk_size), dtype=torch.int32
                     )
             else:
                 pp_proxy_tensors = None
@@ -522,7 +533,7 @@ def get_batch_sizes_to_capture(model_runner: ModelRunner, num_tokens_per_bs=1):
         mul_base *= 2
         num_tokens_per_bs = 1  # tbo not test, set num_tokens_per_bs to 1
 
-    if require_gathered_buffer(server_args):
+    if require_gathered_buffer(server_args) or server_args.minimax_opt:
         mul_base *= get_attention_tp_size()
 
     if mul_base % get_attention_cp_size() != 0:
@@ -725,6 +736,7 @@ class CudaGraphRunner:
             hc_hidden_size=getattr(
                 self.model_runner.model_config, "hc_hidden_size", None
             ),
+            pp_proxy_topk_size=self.model_runner.get_pp_proxy_topk_size(),
         )
         self.buffers.share_buffers()
 
@@ -1111,7 +1123,19 @@ class CudaGraphRunner:
             global_forward_mode=self.capture_forward_mode,
             lora_ids=lora_ids,
         )
-
+        # mHC target models (e.g. DSV4-Flash) must emit pre-hc-head hidden states
+        # (width = hc_hidden_size) so the EAGLE draft/NextN model can consume them.
+        # The verify graph freezes its hidden-output width at capture time, so the
+        # flag must be set here — a runtime flag on the replayed batch is ignored.
+        # Only the target-verify graph needs it; draft workers produce pre-hc-head
+        # hidden unconditionally in their NextN forward.
+        if (
+            self.capture_forward_mode.is_target_verify()
+            and not self.model_runner.is_draft_worker
+            and getattr(self.model_runner.model_config, "hc_hidden_size", None)
+            is not None
+        ):
+            forward_batch.return_hidden_states_before_norm = True
         # HiSparse: set coordinator so the hisparse code path is captured into the graph
         forward_batch.hisparse_coordinator = self.model_runner.hisparse_coordinator
         if forward_batch.hisparse_coordinator is not None:

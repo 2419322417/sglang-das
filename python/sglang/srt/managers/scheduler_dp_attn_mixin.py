@@ -1,11 +1,17 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 
 from sglang.srt.batch_overlap.two_batch_overlap import TboDPAttentionPreparer
+from sglang.srt.configs.model_config import is_mtp_index_share_enabled
 from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -19,6 +25,28 @@ if TYPE_CHECKING:
 
 
 _ENABLE_METRICS_DP_ATTENTION = envs.SGLANG_ENABLE_METRICS_DP_ATTENTION.get()
+
+logger = logging.getLogger(__name__)
+DP_DECODE_STEP_PROTOCOL_VERSION = 2
+DP_DECODE_STEP_BUILD_ID = 2026071602
+
+
+def _mtp_draft_seed_missing(local_batch: Optional[ScheduleBatch]) -> bool:
+    """Whether this rank's active EAGLE draft lacks a usable top-k seed."""
+    if local_batch is None or local_batch.forward_mode.is_idle():
+        return False
+
+    spec_info = getattr(local_batch, "spec_info", None)
+    is_draft_input = getattr(spec_info, "is_draft_input", None)
+    if not (callable(is_draft_input) and is_draft_input()):
+        return False
+
+    future_indices = getattr(spec_info, "future_indices", None)
+    if future_indices is not None:
+        return getattr(future_indices, "mtp_topk_indices_valid", None) is not True
+
+    seed = getattr(spec_info, "mtp_topk_indices", None)
+    return seed is None or seed.shape[0] != local_batch.batch_size()
 
 
 @dataclass
@@ -34,6 +62,12 @@ class MLPSyncBatchInfo:
     local_can_run_tbo: bool
     local_forward_mode: int
 
+    # Extra StepInfo fields after the original six MLPSync values:
+    # [protocol, build_id, epoch, transfer, prealloc, retracted, running, paused,
+    #  pd_elapsed_ms, pd_over_budget]
+    scheduler_step_info: Optional[list[int]] = None
+    gathered_scheduler_step_info: Optional[torch.Tensor] = None
+
     # some gathered elements
     tp0_info: torch.Tensor = None
     global_num_tokens: list[int] = None
@@ -43,63 +77,167 @@ class MLPSyncBatchInfo:
     dp_cooperation_info: Optional[DPCooperationInfo] = None
 
     def _get_local_tensor(self, device, dtype=torch.int64) -> torch.Tensor:
-        return torch.tensor(
-            [
-                self.num_tokens,
-                self.num_tokens_for_logprob,
-                int(self.can_cuda_graph),
-                int(self.is_extend_in_batch),
-                int(self.local_can_run_tbo),
-                self.local_forward_mode,
-            ],
-            device=device,
-            dtype=dtype,
-        )
+        values = [
+            self.num_tokens,
+            self.num_tokens_for_logprob,
+            int(self.can_cuda_graph),
+            int(self.is_extend_in_batch),
+            int(self.local_can_run_tbo),
+            self.local_forward_mode,
+        ]
+        if self.scheduler_step_info is not None:
+            if len(self.scheduler_step_info) != 10:
+                raise RuntimeError(
+                    "DP Decode StepInfo must contain exactly 10 scheduler fields"
+                )
+            values.extend(self.scheduler_step_info)
+        return torch.tensor(values, device=device, dtype=dtype)
 
     def _get_fallback_tensor(self, device, dtype=torch.int64) -> torch.Tensor:
-        return torch.tensor(
-            [
-                0,  # num_tokens
-                0,  # num_tokens_for_logprob
-                1,  # can_cuda_graph
-                0,  # is_extend_in_batch
-                1,  # local_can_run_tbo
-                ForwardMode.IDLE.value,  # local_forward_mode
-            ],
-            device=device,
-            dtype=dtype,
-        )
+        values = [
+            0,  # num_tokens
+            0,  # num_tokens_for_logprob
+            1,  # can_cuda_graph
+            0,  # is_extend_in_batch
+            1,  # local_can_run_tbo
+            ForwardMode.IDLE.value,  # local_forward_mode
+        ]
+        if self.scheduler_step_info is not None:
+            values.extend(self.scheduler_step_info)
+        return torch.tensor(values, device=device, dtype=dtype)
 
     def all_gather(self, device, group: torch.distributed.ProcessGroup):
         local_info_tensor = self._get_local_tensor(device=device)
-        global_info_tensor = torch.empty(
-            (self.dp_size, self.tp_size * self.cp_size, 6),
-            dtype=torch.int64,
-            device=device,
+        width = int(local_info_tensor.numel())
+        expected_world = self.dp_size * self.tp_size * self.cp_size
+        actual_world = torch.distributed.get_world_size(group=group)
+        if actual_world != expected_world:
+            raise RuntimeError(
+                "DP Decode scheduler group size mismatch: "
+                f"actual={actual_world} expected={expected_world}"
+            )
+
+        if self.scheduler_step_info is not None and device == "cpu":
+            # Use list all_gather for ROCm/HCU Gloo builds where _allgather_base may be unavailable.
+            gathered = [
+                torch.empty_like(local_info_tensor) for _ in range(actual_world)
+            ]
+            torch.distributed.all_gather(
+                gathered,
+                local_info_tensor,
+                group=group,
+            )
+            global_info_flat = torch.stack(gathered, dim=0)
+        else:
+            global_info_flat = torch.empty(
+                (actual_world, width),
+                dtype=torch.int64,
+                device=device,
+            )
+            torch.distributed.all_gather_into_tensor(
+                global_info_flat.flatten(),
+                local_info_tensor,
+                group=group,
+            )
+        global_info_tensor = global_info_flat.view(
+            self.dp_size,
+            self.tp_size * self.cp_size,
+            width,
         )
 
-        torch.distributed.all_gather_into_tensor(
-            global_info_tensor.flatten(),
-            local_info_tensor,
-            group=group,
-        )
+        if self.scheduler_step_info is not None:
+            # Validate the raw values from every scheduler rank before masking
+            # inactive model ranks.  Every participant must report one identical
+            # protocol version and epoch.
+            step_all = global_info_flat[:, 6:].cpu()
+            versions = step_all[:, 0]
+            builds = step_all[:, 1]
+            epochs = step_all[:, 2]
+            if (
+                int(versions.min().item()) != DP_DECODE_STEP_PROTOCOL_VERSION
+                or int(versions.max().item()) != DP_DECODE_STEP_PROTOCOL_VERSION
+            ):
+                raise RuntimeError(
+                    "DP Decode StepInfo protocol mismatch across ranks: "
+                    f"{versions.tolist()}"
+                )
+            if (
+                int(builds.min().item()) != DP_DECODE_STEP_BUILD_ID
+                or int(builds.max().item()) != DP_DECODE_STEP_BUILD_ID
+            ):
+                raise RuntimeError(
+                    "DP Decode StepInfo build mismatch across ranks: "
+                    f"{builds.tolist()}"
+                )
+            if int(epochs.min().item()) != int(epochs.max().item()):
+                raise RuntimeError(
+                    "DP Decode scheduler epoch mismatch across ranks: "
+                    f"{epochs.tolist()}"
+                )
+            paused = step_all[:, 7]
+            if int(paused.min().item()) != int(paused.max().item()):
+                raise RuntimeError(
+                    "DP Decode paused-state mismatch across ranks: "
+                    f"{paused.tolist()}"
+                )
+
         if device == "cpu":
             tp_active_ranks = get_tp_group().active_ranks_cpu
         else:
             tp_active_ranks = get_tp_group().active_ranks
 
-        # Set fallback values for inactive ranks
-        tp_info = global_info_tensor.view(self.dp_size * self.tp_size * self.cp_size, 6)
-        tp_info[tp_active_ranks == 0] = self._get_fallback_tensor(device=device)
+        # Preserve epoch/diagnostic fields for inactive ranks; only replace the
+        # six model-facing MLPSync fields with idle fallback values.
+        tp_info = global_info_tensor.view(expected_world, width)
+        inactive = tp_active_ranks == 0
+        fallback = self._get_fallback_tensor(device=device)
+        if width == 6:
+            tp_info[inactive] = fallback
+        else:
+            tp_info[inactive, :6] = fallback[:6]
 
         tp0_info = global_info_tensor[:, 0, :]
         self.tp0_info = tp0_info
-        # Perform only one Device-to-Host (D2H) memory copy
         cpu_data = tp0_info[:, :2].cpu()
         self.global_num_tokens = cpu_data[:, 0].tolist()
         self.global_num_tokens_for_logprob = cpu_data[:, 1].tolist()
         self.can_cuda_graph = bool(tp0_info[:, 2].min().item())
         self.is_extend_in_batch = bool(tp0_info[:, 3].max().item())
+
+        if self.scheduler_step_info is not None:
+            step_tp0 = tp0_info[:, 6:].cpu()
+            self.gathered_scheduler_step_info = step_tp0
+            # Observability only: keep at debug to avoid info-level spam when
+            # pd_over_budget is frequently set (would otherwise log every step).
+            if (
+                logger.isEnabledFor(logging.DEBUG)
+                and torch.distributed.get_rank(group=group) == 0
+            ):
+                epoch = int(step_tp0[0, 2].item())
+                log_every = 1024
+                over_budget = int(step_tp0[:, 9].max().item())
+                if over_budget or (log_every > 0 and epoch % log_every == 0):
+
+                    def _minmax(col: int) -> tuple[int, int]:
+                        return (
+                            int(step_tp0[:, col].min().item()),
+                            int(step_tp0[:, col].max().item()),
+                        )
+
+                    logger.debug(
+                        "DP Decode StepInfo epoch=%s transfer=%s prealloc=%s "
+                        "retracted=%s running=%s paused=%s pd_ms=%s "
+                        "over_budget=%s",
+                        epoch,
+                        _minmax(3),
+                        _minmax(4),
+                        _minmax(5),
+                        _minmax(6),
+                        _minmax(7),
+                        _minmax(8),
+                        _minmax(9),
+                    )
+
         if _ENABLE_METRICS_DP_ATTENTION:
             self.dp_cooperation_info = DPCooperationInfo.create(tp0_info[:, 5].tolist())
 
@@ -139,6 +277,9 @@ def prepare_mlp_sync_batch_raw(
     require_mlp_tp_gather: bool,
     disable_overlap_schedule: bool,
     offload_tags: set[str],
+    mtp_index_share_for_topk1: bool = False,
+    scheduler_step_info: Optional[list[int]] = None,
+    sync_group_override: Optional[torch.distributed.ProcessGroup] = None,
 ):
     # Check if other DP workers have running batches
     if local_batch is None or local_batch.forward_mode.is_prebuilt():
@@ -168,13 +309,25 @@ def prepare_mlp_sync_batch_raw(
         or local_batch.forward_mode.is_decode_or_idle()
         or local_batch.forward_mode.is_prebuilt()
     ) and not disable_cuda_graph
+    if (
+        not skip_all_gather
+        and mtp_index_share_for_topk1
+        and _mtp_draft_seed_missing(local_batch)
+    ):
+        # Feed the local fallback through the existing DP all-gather so all
+        # ranks make the same graph/eager decision. Skip mode remains local.
+        can_cuda_graph = False
 
     is_extend_in_batch = local_batch.forward_mode.is_extend() if local_batch else False
     if local_batch is not None:
         local_batch.is_extend_in_batch = is_extend_in_batch
 
     tbo_preparer = TboDPAttentionPreparer()
-    if len(offload_tags) == 0 and (
+    if sync_group_override is not None:
+        # Scheduler metadata always uses its dedicated CPU communicator.
+        group = sync_group_override
+        device = "cpu"
+    elif len(offload_tags) == 0 and (
         disable_overlap_schedule
         or envs.SGLANG_NCCL_ALL_GATHER_IN_OVERLAP_SCHEDULER_SYNC_BATCH.get()
     ):
@@ -196,7 +349,13 @@ def prepare_mlp_sync_batch_raw(
         is_extend_in_batch=is_extend_in_batch,
         local_can_run_tbo=local_can_run_tbo,
         local_forward_mode=local_forward_mode,
+        scheduler_step_info=scheduler_step_info,
     )
+
+    if scheduler_step_info is not None and skip_all_gather:
+        raise RuntimeError(
+            "PD Decode DP sync is incompatible with SGLANG_SCHEDULER_SKIP_ALL_GATHER"
+        )
 
     if not skip_all_gather:
         mlp_sync_info.all_gather(device=device, group=group)
@@ -227,7 +386,49 @@ def prepare_mlp_sync_batch_raw(
 
 class SchedulerDPAttnMixin:
     def prepare_mlp_sync_batch(self: Scheduler, local_batch: ScheduleBatch):
-        return prepare_mlp_sync_batch_raw(
+        # Fold scheduler epoch, queue stats and the original six MLPSync fields
+        # into one fixed-shape all-gather for PD Decode.
+        is_disagg_decode = (
+            self.server_args.disaggregation_mode == "decode"
+            and self.server_args.enable_dp_attention
+        )
+        scheduler_step_info = None
+        sync_group_override = None
+        epoch = None
+        if is_disagg_decode:
+            sync_group_override = getattr(self, "dp_scheduler_cpu_group", None)
+            if sync_group_override is None:
+                raise RuntimeError(
+                    "dedicated dp_scheduler_cpu_group is not initialized"
+                )
+            epoch = int(getattr(self, "_dp_scheduler_epoch", 0))
+            transfer_n = len(self.disagg_decode_transfer_queue.queue)
+            prealloc_queue = self.disagg_decode_prealloc_queue
+            prealloc_n = len(getattr(prealloc_queue, "queue", []) or [])
+            retracted_n = len(prealloc_queue.retracted_queue)
+            running_batch = getattr(self, "running_batch", None)
+            running_n = len(getattr(running_batch, "reqs", []) or [])
+            paused = int(bool(getattr(self, "_engine_paused", False)))
+            pd_elapsed_ms = int(
+                round(float(getattr(self, "_dp_scheduler_last_pd_ms", 0.0)))
+            )
+            pd_over_budget = int(
+                bool(getattr(self, "_dp_scheduler_pd_over_budget", False))
+            )
+            scheduler_step_info = [
+                DP_DECODE_STEP_PROTOCOL_VERSION,
+                DP_DECODE_STEP_BUILD_ID,
+                epoch,
+                transfer_n,
+                prealloc_n,
+                retracted_n,
+                running_n,
+                paused,
+                pd_elapsed_ms,
+                pd_over_budget,
+            ]
+
+        result = prepare_mlp_sync_batch_raw(
             local_batch,
             dp_size=self.server_args.dp_size,
             attn_tp_size=self.attn_tp_size,
@@ -238,7 +439,19 @@ class SchedulerDPAttnMixin:
             require_mlp_tp_gather=require_mlp_tp_gather(self.server_args),
             disable_overlap_schedule=self.server_args.disable_overlap_schedule,
             offload_tags=self.offload_tags,
+            mtp_index_share_for_topk1=(
+                self.spec_algorithm.is_eagle()
+                and self.server_args.speculative_eagle_topk == 1
+                and is_mtp_index_share_enabled(self.model_config.hf_config)
+            ),
+            scheduler_step_info=scheduler_step_info,
+            sync_group_override=sync_group_override,
         )
+        if is_disagg_decode:
+            # Increment only after all ranks completed and validated the same
+            # StepInfo collective.
+            self._dp_scheduler_epoch = epoch + 1
+        return result
 
     def maybe_prepare_mlp_sync_batch(
         self: Scheduler,

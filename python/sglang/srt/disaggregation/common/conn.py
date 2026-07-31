@@ -451,6 +451,9 @@ class CommonKVManager(BaseKVManager):
         socket = zmq.Context().socket(zmq.PUSH)
         if is_ipv6:
             socket.setsockopt(zmq.IPV6, 1)
+        # Avoid blocking the scheduler forever on a stalled PUSH.
+        socket.setsockopt(zmq.SNDTIMEO, 5000)
+        socket.setsockopt(zmq.SNDHWM, 1000)
         socket.connect(endpoint)
         return socket
 
@@ -607,8 +610,8 @@ class CommonKVManager(BaseKVManager):
             and len(dst_kv_ptrs) >= 2 * main_total_layers
             and (is_compact_full_attention_layout or decode_has_appended_draft_kv)
         ):
-            # Decode can append draft/MTP KV after the main model layout:
-            # [K_main..., V_main..., K_draft..., V_draft...].  Also, hybrid
+            # Decode normalizes main and draft/MTP KV as:
+            # [K_main..., K_draft..., V_main..., V_draft...].  Hybrid
             # linear-attention models store only full-attention layers in the
             # KV pool, so PP stage model-layer ids must be converted to compact
             # full-attention KV indices before slicing the decode-side pointers.
@@ -635,8 +638,8 @@ class CommonKVManager(BaseKVManager):
             if compact_end_layer <= main_total_layers:
                 dst_k_ptrs = dst_kv_ptrs[compact_start_layer:compact_end_layer]
                 dst_v_ptrs = dst_kv_ptrs[
-                    main_total_layers
-                    + compact_start_layer : main_total_layers
+                    dst_num_total_layers
+                    + compact_start_layer : dst_num_total_layers
                     + compact_end_layer
                 ]
                 layers_current_pp_stage = len(src_k_ptrs)
@@ -1192,6 +1195,9 @@ class CommonKVReceiver(BaseKVReceiver):
                 sock = cls._ctx.socket(zmq.PUSH)
                 if is_ipv6:
                     sock.setsockopt(zmq.IPV6, 1)
+                # Avoid blocking the scheduler forever on a stalled PUSH.
+                sock.setsockopt(zmq.SNDTIMEO, 5000)
+                sock.setsockopt(zmq.SNDHWM, 1000)
                 sock.connect(endpoint)
                 cls._socket_cache[endpoint] = sock
                 cls._socket_locks[endpoint] = threading.Lock()

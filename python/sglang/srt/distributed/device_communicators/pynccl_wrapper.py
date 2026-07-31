@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/device_communicators/pynccl.py
@@ -32,6 +35,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch.distributed import ReduceOp
+
+from sglang.srt.utils.common import is_hcu
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +254,21 @@ class NCCLLibrary:
                 cudaStream_t,
             ],
         ),
+        # ncclResult_t  ncclAllToAll(
+        #   const void* sendbuff, void* recvbuff, size_t count,
+        #   ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+        Function(
+            "ncclAllToAll",
+            ncclResult_t,
+            [
+                buffer_type,
+                buffer_type,
+                ctypes.c_size_t,
+                ncclDataType_t,
+                ncclComm_t,
+                cudaStream_t,
+            ],
+        ),
         # ncclResult_t  ncclSend(
         #   const void* sendbuff, size_t count, ncclDataType_t datatype,
         #   int dest, ncclComm_t comm, cudaStream_t stream);
@@ -343,15 +363,21 @@ class NCCLLibrary:
                 NCCLLibrary.path_to_library_cache[so_file] = lib
             self.lib = NCCLLibrary.path_to_library_cache[so_file]
         except Exception as e:
+            accelerator_platforms = (
+                "NVIDIA/HCU/MTHREADS devices"
+                if is_hcu()
+                else "NVIDIA/AMD/MTHREADS GPUs"
+            )
             logger.error(
                 "Failed to load NCCL library from %s . "
-                "It is expected if you are not running on NVIDIA/AMD/MTHREADS GPUs. "
+                "It is expected if you are not running on %s. "
                 "Otherwise, the nccl library might not exist, be corrupted "
                 "or it does not support the current platform %s. "
                 "If you already have the library, please set the "
                 "environment variable SGLANG_NCCL_SO_PATH"
                 " to point to the correct nccl library path.",
                 so_file,
+                accelerator_platforms,
                 platform.platform(),
             )
             raise e
@@ -486,6 +512,21 @@ class NCCLLibrary:
         # by ctypes automatically
         self.NCCL_CHECK(
             self._funcs["ncclAllGather"](
+                sendbuff, recvbuff, count, datatype, comm, stream
+            )
+        )
+
+    def ncclAllToAll(
+        self,
+        sendbuff: buffer_type,
+        recvbuff: buffer_type,
+        count: int,
+        datatype: int,
+        comm: ncclComm_t,
+        stream: cudaStream_t,
+    ) -> None:
+        self.NCCL_CHECK(
+            self._funcs["ncclAllToAll"](
                 sendbuff, recvbuff, count, datatype, comm, stream
             )
         )

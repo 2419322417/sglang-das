@@ -14,7 +14,7 @@
 
 from typing import Optional
 import numpy as np
-from lightop import moe_gemm_marlin_w16a16, get_moe_cuda_marlin_config_w16a16
+from lightop.moe import moe_gemm_marlin_w16a16, get_moe_cuda_marlin_config_w16a16
 import torch
 import torch.nn.functional as F
 
@@ -29,8 +29,8 @@ if _is_cuda:
     from sglang.jit_kernel.activation import silu_and_mul
     from sglang.jit_kernel.moe_wna16_marlin import moe_wna16_marlin_gemm
 
-from lightop import fuse_silu_and_mul
-from lightop import op as op
+from lightop.activation import fuse_silu_and_mul
+from lightop import moe as op
 from vllm.platforms import current_platform
 device_name = current_platform.get_device_name().replace(" ", "_")
 num_cus= torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
@@ -556,7 +556,7 @@ def fused_marlin_moe_w16a16(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-    from sglang.srt.layers.moe.fused_moe_triton.moe_align_block_size import dcu_moe_align_block_size
+    from sglang.srt.layers.moe.fused_moe_triton.moe_align_block_size import hcu_moe_align_block_size
 
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
@@ -585,7 +585,7 @@ def fused_marlin_moe_w16a16(
     if global_num_experts == -1:
         global_num_experts = E
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = dcu_moe_align_block_size(topk_ids, block_size_m, global_num_experts)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = hcu_moe_align_block_size(topk_ids, block_size_m, global_num_experts)
 
     # TODO: tune this further for specific models
     intermediate_cache2 = torch.empty(

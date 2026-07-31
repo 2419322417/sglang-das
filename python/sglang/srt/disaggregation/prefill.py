@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 Life cycle of a request in the prefill server
 
@@ -66,6 +70,14 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import KVCache
 
 logger = logging.getLogger(__name__)
+
+
+def _get_disagg_prefill_draft_input(
+    batch: ScheduleBatch, result: GenerationBatchResult
+):
+    """Return speculative metadata produced by this exact forward."""
+    next_draft_input = getattr(result, "next_draft_input", None)
+    return next_draft_input if next_draft_input is not None else batch.spec_info
 
 
 def _split_kv_infos(values: List[int]) -> tuple[List[int], List[int]]:
@@ -260,8 +272,8 @@ class PrefillBootstrapQueue:
         self.bootstrap_port = bootstrap_port
         self.queue: List[Req] = []
         self.gloo_group = gloo_group
-        self.max_total_num_tokens = max_total_num_tokens
         self.scheduler = scheduler
+        self.max_total_num_tokens = max_total_num_tokens
         self.transfer_backend = transfer_backend
         if envs.SGLANG_DISAGG_STAGING_BUFFER.get() and self.is_mla_backend:
             raise RuntimeError(
@@ -270,12 +282,31 @@ class PrefillBootstrapQueue:
             )
         self.kv_manager = self._init_kv_manager()
 
-        if self.scheduler.tp_worker.is_hybrid_swa:
-            # FIXME: current SWA allocation allocate full kv cache size in prefill
+        use_dsv4_full_token_pool = (
+            self.scheduler.tp_worker.is_hybrid_swa
+            and isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool)
+            and envs.SGLANG_DSV4_PD_PREFILL_USE_FULL_TOKEN_POOL.get()
+        )
+        if use_dsv4_full_token_pool:
+            self.max_total_num_tokens = (
+                self.scheduler.tp_worker.model_runner.max_token_pool_size
+            )
+            logger.info(
+                "DeepSeek-V4 PD prefill admission uses full token pool capacity: %d",
+                self.max_total_num_tokens,
+            )
+        elif self.scheduler.tp_worker.is_hybrid_swa:
+            # Legacy fallback for hybrid-SWA pools that allocate SWA KV for the
+            # full prompt during PD prefill.
             self.max_total_num_tokens = min(
                 self.max_total_num_tokens,
                 self.scheduler.tp_worker.model_runner.swa_max_total_num_tokens,
             )
+            if isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool):
+                logger.info(
+                    "DeepSeek-V4 PD prefill admission uses legacy SWA pool cap: %d",
+                    self.max_total_num_tokens,
+                )
 
     def _init_kv_manager(self) -> CommonKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
@@ -677,6 +708,10 @@ class SchedulerDisaggregationPrefillMixin:
             result.indexer_topk_output.finalize()
             result.indexer_topk_output = None
 
+        # In overlap mode batch is a lightweight snapshot; the producer-owned
+        # next_draft_input preserves the exact row order of this forward.
+        draft_input = _get_disagg_prefill_draft_input(batch, result)
+
         logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         next_token_ids = result.next_token_ids.tolist()
@@ -703,14 +738,21 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
-                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
-                    req.output_topk_p = batch.spec_info.topk_p[i]
-                    req.output_topk_index = batch.spec_info.topk_index[i]
+                if self.spec_algorithm.is_eagle() and draft_input is not None:
+                    req.output_topk_p = draft_input.topk_p[i]
+                    req.output_topk_index = draft_input.topk_index[i]
                     req.hidden_states_tensor = (
-                        batch.spec_info.hidden_states[i].cpu().clone()
+                        draft_input.hidden_states[i].cpu().clone()
+                    )
+                    mtp_indices = getattr(draft_input, "mtp_topk_indices", None)
+                    req.mtp_topk_indices_tensor = (
+                        mtp_indices[i].cpu().clone()
+                        if mtp_indices is not None
+                        else None
                     )
                 else:
                     req.hidden_states_tensor = None
+                    req.mtp_topk_indices_tensor = None
                 if req.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
                     assert extend_input_len_per_req is not None

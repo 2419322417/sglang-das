@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 from __future__ import annotations
 
 import atexit
@@ -45,6 +49,7 @@ from sglang.srt.mem_cache.memory_pool import (
 )
 from sglang.srt.mem_cache.memory_pool_host import (
     MHATokenToKVPoolHost,
+    MHATokenToKVPoolHostHCU,
     MLATokenToKVPoolHost,
 )
 from sglang.srt.mem_cache.radix_cache import (
@@ -57,13 +62,13 @@ from sglang.srt.mem_cache.utils import (
     split_node_hash_value,
 )
 from sglang.srt.observability.metrics_collector import StorageMetricsCollector
-
+from sglang.srt.utils import get_bool_env_var
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
-
+_kv_layout_hcu_fa = get_bool_env_var("SGLANG_KV_LAYOUT_HCU_FA", default="true")
 
 class HiRadixCache(RadixCache):
 
@@ -74,14 +79,24 @@ class HiRadixCache(RadixCache):
         self.kv_cache = params.token_to_kv_pool_allocator.get_kvcache()
 
         if isinstance(self.kv_cache, MHATokenToKVPool):
-            self.token_to_kv_pool_host = MHATokenToKVPoolHost(
-                self.kv_cache,
-                server_args.hicache_ratio,
-                server_args.hicache_size,
-                self.page_size,
-                server_args.hicache_mem_layout,
-                allocator_type=server_args.hicache_storage_backend,
-            )
+            if _kv_layout_hcu_fa:
+                self.token_to_kv_pool_host = MHATokenToKVPoolHostHCU(
+                    self.kv_cache,
+                    server_args.hicache_ratio,
+                    server_args.hicache_size,
+                    self.page_size,
+                    server_args.hicache_mem_layout,
+                    allocator_type=server_args.hicache_storage_backend,
+                )
+            else:
+                self.token_to_kv_pool_host = MHATokenToKVPoolHost(
+                    self.kv_cache,
+                    server_args.hicache_ratio,
+                    server_args.hicache_size,
+                    self.page_size,
+                    server_args.hicache_mem_layout,
+                    allocator_type=server_args.hicache_storage_backend,
+                )
         elif isinstance(self.kv_cache, NSATokenToKVPool):
             # Filled by attach_hybrid_nsa_pool_to_hiradix_cache after storage extra_config is parsed.
             self.token_to_kv_pool_host = None

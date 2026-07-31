@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +16,7 @@
 # ==============================================================================
 """The arguments of the server."""
 
-# Temporary PR-only touch to validate DCU auto gate for python/sglang changes.
+# Temporary PR-only touch to validate HCU auto gate for python/sglang changes.
 from __future__ import annotations
 
 import argparse
@@ -39,6 +42,7 @@ from sglang.srt.utils.common import (
     LORA_TARGET_ALL_MODULES,
     SUPPORTED_LORA_TARGET_MODULES,
     cpu_has_amx_support,
+    get_bool_env_var,
     get_device,
     get_device_memory_capacity,
     get_device_name,
@@ -50,11 +54,10 @@ from sglang.srt.utils.common import (
     is_blackwell_supported,
     is_cpu,
     is_cuda,
-    is_dcu,
-    is_dcu_native_fp8_supported,
     is_flashinfer_available,
-    is_hip,
     is_hcu,
+    is_hcu_native_fp8_supported,
+    is_hip,
     is_hopper_with_cuda_12_3,
     is_host_cpu_arm64,
     is_mps,
@@ -144,6 +147,7 @@ QUANTIZATION_CHOICES = [
     "mlx_q4",  # 4 bits, group_size=64 (mlx-community default)
     "mlx_q8",  # 8 bits, group_size=64
     "unquant",
+    "slimquant_w4a8",
     "slimquant_w4a8_marlin",
     "slimquant_marlin",
 ]
@@ -159,7 +163,7 @@ ATTENTION_BACKEND_CHOICES = [
     "dsv4",
     "compressed",  # Deprecated alias for "dsv4"
     # ransplant from vllm
-    "dcu_mla",
+    "hcu_mla",
     # NVIDIA specific
     "cutlass_mla",
     "fa3",
@@ -179,51 +183,51 @@ ATTENTION_BACKEND_CHOICES = [
     "intel_xpu",
 ]
 
-DCU_ATTENTION_BACKEND_CHOICES = {
+HCU_ATTENTION_BACKEND_CHOICES = {
     "fa3",
-    "dcu_mla",
+    "hcu_mla",
     "triton",
     "nsa",
     "dsv4",
 }
 
-DCU_GENERIC_ATTENTION_BACKEND_CHOICES = {
+HCU_GENERIC_ATTENTION_BACKEND_CHOICES = {
     "fa3",
-    "dcu_mla",
+    "hcu_mla",
     "triton",
 }
 
-DCU_NSA_PREFILL_BACKEND_CHOICES = {
+HCU_NSA_PREFILL_BACKEND_CHOICES = {
     "flashmla_sparse",
     "flashmla_kv",
     "flashmla_auto",
 }
 
-DCU_NSA_DECODE_BACKEND_CHOICES = {
+HCU_NSA_DECODE_BACKEND_CHOICES = {
     "flashmla_sparse",
     "flashmla_kv",
 }
 
-DCU_GENERIC_KV_CACHE_DTYPE_CHOICES = {
+HCU_GENERIC_KV_CACHE_DTYPE_CHOICES = {
     "auto",
     "bf16",
     "bfloat16",
     "fp8_e5m2",
 }
 
-DCU_NATIVE_FP8_KV_CACHE_DTYPE_CHOICES = {
-    *DCU_GENERIC_KV_CACHE_DTYPE_CHOICES,
+HCU_NATIVE_FP8_KV_CACHE_DTYPE_CHOICES = {
+    *HCU_GENERIC_KV_CACHE_DTYPE_CHOICES,
     "fp8_e4m3",
 }
 
-DCU_NSA_KV_CACHE_DTYPE_CHOICES = {
+HCU_NSA_KV_CACHE_DTYPE_CHOICES = {
     "auto",
     "bf16",
     "bfloat16",
     "fp8_e4m3",
 }
 
-DCU_DSV4_KV_CACHE_DTYPE_CHOICES = {
+HCU_DSV4_KV_CACHE_DTYPE_CHOICES = {
     "auto",
     "bf16",
     "bfloat16",
@@ -633,6 +637,9 @@ class ServerArgs:
         None  # auto-detect based on hardware/kv_cache_dtype
     )
     disable_flashinfer_autotune: bool = False
+    pack_paged_kv_to_varlen: Literal["auto", "on", "off"] = "auto"
+    pack_paged_kv_to_varlen_min_kv_tokens: int = 16384
+    pack_paged_kv_to_varlen_min_q_tokens: int = 8192
     mamba_backend: str = "triton"
 
     # Speculative decoding
@@ -780,6 +787,9 @@ class ServerArgs:
     disable_tokenizer_batch_decode: bool = False
     disable_outlines_disk_cache: bool = False
     disable_custom_all_reduce: bool = False
+    # Custom all-reduce backend: auto | native | aiter | off.
+    # --disable-custom-all-reduce takes precedence and forces this to "off".
+    custom_all_reduce_backend: str = "auto"
     enable_mscclpp: bool = False
     enable_torch_symm_mem: bool = False
     pre_warm_nccl: bool = dataclasses.field(
@@ -828,6 +838,8 @@ class ServerArgs:
     enable_deterministic_inference: bool = False
     rl_on_policy_target: Optional[str] = None
     enable_attn_tp_input_scattered: bool = False
+    # MiniMax M2 optimization: sequence-parallel prefill over TP ranks.
+    minimax_opt: bool = False
     gc_threshold: Optional[List[int]] = None
     # Context parallelism used in the long sequence prefill phase of DeepSeek v3.2
     enable_nsa_prefill_context_parallel: bool = False
@@ -994,7 +1006,7 @@ class ServerArgs:
         # deterministic backend is set before auto-detection fills it in.
         self._handle_deterministic_inference()
         self._handle_attention_backend_compatibility()
-        self._validate_dcu_attention_backend_compatibility()
+        self._validate_hcu_attention_backend_compatibility()
         self._handle_mamba_backend()
         self._handle_linear_attn_backend()
         self._handle_kv4_compatibility()
@@ -1776,7 +1788,7 @@ class ServerArgs:
         ):
             return
 
-        if not user_set_prefill and not user_set_decode and is_dcu():
+        if not user_set_prefill and not user_set_decode and is_hcu():
             if kv_cache_dtype == "fp8_e4m3":
                 self.nsa_prefill_backend = "flashmla_auto"
                 self.nsa_decode_backend = "flashmla_kv"
@@ -1919,9 +1931,15 @@ class ServerArgs:
                             assert (
                                 self.dp_size == 1
                             ), "For round-robin split mode, dp attention is not supported."
-                        assert (
-                            self.tp_size <= 8
-                        ), "Context parallel only supports single machine (tp_size <= 8). Cross-machine CP has precision issues."
+                        # HCU nodes expose 16 GPUs on one machine. Keep the
+                        # upstream eight-GPU limit for other platforms, where
+                        # a larger TP group would span machines.
+                        max_single_node_tp_size = 16 if is_hcu() else 8
+                        assert self.tp_size <= max_single_node_tp_size, (
+                            "Context parallel only supports a single machine "
+                            f"(tp_size <= {max_single_node_tp_size}). "
+                            "Cross-machine CP has precision issues."
+                        )
                         self.attn_cp_size = self.tp_size // self.dp_size
 
                         logger.warning(
@@ -2215,9 +2233,15 @@ class ServerArgs:
                 effective_attn_tp_size = (
                     self.tp_size // attn_dp_size // self.attn_cp_size
                 )
+                # When effective_attn_tp_size == 1, attention does not apply TP
+                # splitting, so the expected_attn_tp_size check is skipped. In
+                # this case, the fused qkv_proj weights (which are stored with
+                # TP-interleaved layout) will be reordered and loaded in full
+                # by the weight loader.
                 if (
                     expected_attn_tp_size is not None
                     and effective_attn_tp_size != expected_attn_tp_size
+                    and effective_attn_tp_size != 1
                 ):
                     raise ValueError(
                         "MiMoV2ForCausalLM requires effective attention TP "
@@ -2690,7 +2714,7 @@ class ServerArgs:
 
         if not use_mla_backend:
             # MHA architecture
-            if is_dcu():
+            if is_hcu():
                 return "fa3"
             elif is_hopper_with_cuda_12_3() and is_no_spec_infer_or_topk_one(self):
                 # Note: flashinfer 0.6.1 caused performance regression on Hopper attention kernel
@@ -2717,8 +2741,8 @@ class ServerArgs:
                 return "triton"
         else:
             # MLA architecture
-            if is_dcu():
-                return "dcu_mla"
+            if is_hcu():
+                return "hcu_mla"
             elif is_hopper_with_cuda_12_3():
                 return "fa3"
             elif is_sm100_supported():
@@ -2785,8 +2809,8 @@ class ServerArgs:
         if (
             self.attention_backend == "flashmla"
             or self.decode_attention_backend == "flashmla"
-            or self.attention_backend == "dcu_mla"
-            or self.decode_attention_backend == "dcu_mla"
+            or self.attention_backend == "hcu_mla"
+            or self.decode_attention_backend == "hcu_mla"
         ):
             logger.warning(
                 "FlashMLA/HCU MLA only supports a page_size of 64, change page_size to 64."
@@ -2960,46 +2984,46 @@ class ServerArgs:
             self.disable_radix_cache = True
 
     @staticmethod
-    def _get_dcu_arch_name() -> str:
+    def _get_hcu_arch_name() -> str:
         import torch
 
         try:
             props = torch.cuda.get_device_properties(0)
             return getattr(props, "gcnArchName", "") or "unknown"
         except Exception as e:
-            logger.warning("DCU arch detection failed: %s", e)
+            logger.warning("HCU arch detection failed: %s", e)
             return "unknown"
 
-    def _validate_dcu_generic_kv_cache_dtype(
+    def _validate_hcu_generic_kv_cache_dtype(
         self,
         backend: str,
         label: str,
         arch_name: str,
     ) -> None:
         allowed_dtypes = (
-            DCU_NATIVE_FP8_KV_CACHE_DTYPE_CHOICES
-            if is_dcu_native_fp8_supported()
-            else DCU_GENERIC_KV_CACHE_DTYPE_CHOICES
+            HCU_NATIVE_FP8_KV_CACHE_DTYPE_CHOICES
+            if is_hcu_native_fp8_supported()
+            else HCU_GENERIC_KV_CACHE_DTYPE_CHOICES
         )
         if self.kv_cache_dtype in allowed_dtypes:
             return
 
         if self.kv_cache_dtype == "fp8_e4m3":
             raise ValueError(
-                f"DCU {label} '{backend}' does not support "
+                f"HCU {label} '{backend}' does not support "
                 f"--kv-cache-dtype=fp8_e4m3 on {arch_name}. "
-                "fp8_e4m3 for fa3/dcu_mla/triton is only supported on gfx938. "
+                "fp8_e4m3 for fa3/hcu_mla/triton is only supported on gfx938. "
                 f"Please use one of {sorted(allowed_dtypes)} on this device, "
                 "or use --attention-backend nsa with FlashMLA NSA backends for "
                 "fp8_e4m3 KV cache."
             )
 
         raise ValueError(
-            f"DCU {label} '{backend}' supports --kv-cache-dtype in "
+            f"HCU {label} '{backend}' supports --kv-cache-dtype in "
             f"{sorted(allowed_dtypes)}, but got {self.kv_cache_dtype}."
         )
 
-    def _validate_dcu_nsa_backend(
+    def _validate_hcu_nsa_backend(
         self,
         attr: str,
         label: str,
@@ -3011,7 +3035,7 @@ class ServerArgs:
 
         if backend not in allowed_backends:
             raise ValueError(
-                f"DCU --nsa-{label}-backend only supports "
+                f"HCU --nsa-{label}-backend only supports "
                 f"{sorted(allowed_backends)}, but got {backend}. "
                 "Use --attention-backend nsa for NSA models; flashmla_kv, "
                 "flashmla_sparse, and prefill-only flashmla_auto are "
@@ -3024,65 +3048,65 @@ class ServerArgs:
             "fp8_e4m3",
         ):
             raise ValueError(
-                f"DCU --nsa-{label}-backend=flashmla_kv requires "
+                f"HCU --nsa-{label}-backend=flashmla_kv requires "
                 f"--kv-cache-dtype=fp8_e4m3, but got {self.kv_cache_dtype}."
             )
 
-    def _validate_dcu_dsv4_kv_cache_dtype(self) -> None:
-        if self.kv_cache_dtype in DCU_DSV4_KV_CACHE_DTYPE_CHOICES:
+    def _validate_hcu_dsv4_kv_cache_dtype(self) -> None:
+        if self.kv_cache_dtype in HCU_DSV4_KV_CACHE_DTYPE_CHOICES:
             return
 
         raise ValueError(
-            "DCU dsv4 attention backend supports --kv-cache-dtype in "
-            f"{sorted(DCU_DSV4_KV_CACHE_DTYPE_CHOICES)}, but got "
+            "HCU dsv4 attention backend supports --kv-cache-dtype in "
+            f"{sorted(HCU_DSV4_KV_CACHE_DTYPE_CHOICES)}, but got "
             f"{self.kv_cache_dtype}."
         )
 
-    def _validate_dcu_attention_backend_compatibility(self):
-        if not is_dcu():
+    def _validate_hcu_attention_backend_compatibility(self):
+        if not is_hcu():
             return
 
-        arch_name = self._get_dcu_arch_name()
+        arch_name = self._get_hcu_arch_name()
         prefill_backend, decode_backend = self.get_attention_backends()
         for label, backend in (
             ("prefill attention backend", prefill_backend),
             ("decode attention backend", decode_backend),
         ):
-            if backend not in DCU_ATTENTION_BACKEND_CHOICES:
+            if backend not in HCU_ATTENTION_BACKEND_CHOICES:
                 raise ValueError(
-                    f"DCU only supports attention backends "
-                    f"{sorted(DCU_ATTENTION_BACKEND_CHOICES)}, but got "
+                    f"HCU only supports attention backends "
+                    f"{sorted(HCU_ATTENTION_BACKEND_CHOICES)}, but got "
                     f"{backend} for {label}. "
                     "For FlashMLA NSA kernels, use --attention-backend nsa "
                     "together with --nsa-prefill-backend/--nsa-decode-backend."
                 )
 
-            if backend in DCU_GENERIC_ATTENTION_BACKEND_CHOICES:
-                self._validate_dcu_generic_kv_cache_dtype(backend, label, arch_name)
+            if backend in HCU_GENERIC_ATTENTION_BACKEND_CHOICES:
+                self._validate_hcu_generic_kv_cache_dtype(backend, label, arch_name)
             elif backend == "dsv4":
-                self._validate_dcu_dsv4_kv_cache_dtype()
+                self._validate_hcu_dsv4_kv_cache_dtype()
 
         if "nsa" not in (prefill_backend, decode_backend) and not (
             self.nsa_prefill_backend or self.nsa_decode_backend
         ):
             return
 
-        if self.kv_cache_dtype not in DCU_NSA_KV_CACHE_DTYPE_CHOICES:
+        if self.kv_cache_dtype not in HCU_NSA_KV_CACHE_DTYPE_CHOICES:
             raise ValueError(
-                "DCU NSA attention backend supports --kv-cache-dtype in "
-                f"{sorted(DCU_NSA_KV_CACHE_DTYPE_CHOICES)}, but got "
+                "HCU NSA attention backend supports --kv-cache-dtype in "
+                f"{sorted(HCU_NSA_KV_CACHE_DTYPE_CHOICES)}, but got "
                 f"{self.kv_cache_dtype}."
             )
 
-        self._validate_dcu_nsa_backend(
+        self._validate_hcu_nsa_backend(
             "nsa_prefill_backend",
             "prefill",
-            DCU_NSA_PREFILL_BACKEND_CHOICES,
+            HCU_NSA_PREFILL_BACKEND_CHOICES,
         )
-        self._validate_dcu_nsa_backend(
+        self._validate_hcu_nsa_backend(
             "nsa_decode_backend",
             "decode",
-            DCU_NSA_DECODE_BACKEND_CHOICES,
+            HCU_NSA_DECODE_BACKEND_CHOICES,
         )
 
     def _handle_kv4_compatibility(self):
@@ -3446,24 +3470,24 @@ class ServerArgs:
 
         if self.moe_a2a_backend == "megamoe":
             self.ep_size = self.tp_size
-            if is_dcu():
-                dcu_runtime = envs.SGLANG_DCU_MEGA_MOE_RUNTIME.get().strip().lower()
-                if dcu_runtime not in {"deep_gemm", "megamoe"}:
+            if is_hcu():
+                hcu_runtime = envs.SGLANG_HCU_MEGA_MOE_RUNTIME.get().strip().lower()
+                if hcu_runtime not in {"deep_gemm", "megamoe"}:
                     raise ValueError(
-                        "SGLANG_DCU_MEGA_MOE_RUNTIME must be 'deep_gemm' or "
-                        f"'megamoe', got {dcu_runtime!r}"
+                        "SGLANG_HCU_MEGA_MOE_RUNTIME must be 'deep_gemm' or "
+                        f"'megamoe', got {hcu_runtime!r}"
                     )
-                if dcu_runtime == "deep_gemm":
+                if hcu_runtime == "deep_gemm":
                     if not self.disable_cuda_graph:
                         logger.warning(
-                            "Cuda graph is disabled for the DCU deep_gemm "
+                            "Cuda graph is disabled for the HCU deep_gemm "
                             "W8A8 MegaMoE runtime."
                         )
                     self.disable_cuda_graph = True
                     self.disable_piecewise_cuda_graph = True
                 else:
                     logger.info(
-                        "DCU MegaMoE uses the standalone megamoe runtime; "
+                        "HCU MegaMoE uses the standalone megamoe runtime; "
                         "CUDA graph remains enabled."
                     )
             if not envs.SGLANG_OPT_FIX_MEGA_MOE_MEMORY.is_set():
@@ -3728,7 +3752,8 @@ class ServerArgs:
         self._resolve_storage_layout_compatibility()
 
         # Step 3: IO-decode backend compatibility (may change io backend).
-        io_changed = self._resolve_io_decode_attention_compatibility()
+        # io_changed = self._resolve_io_decode_attention_compatibility()
+        io_changed = False
 
         # Step 4: Re-normalize layout after io backend changes.
         if io_changed:
@@ -4514,6 +4539,26 @@ class ServerArgs:
                     self.nnodes,
                 )
             envs.SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2.set("0")
+        # Normalize custom_all_reduce_backend. --disable-custom-all-reduce wins.
+        if self.disable_custom_all_reduce:
+            if self.custom_all_reduce_backend != "off":
+                logger.info(
+                    "--disable-custom-all-reduce overrides "
+                    "--custom-all-reduce-backend=%s to 'off'.",
+                    self.custom_all_reduce_backend,
+                )
+            self.custom_all_reduce_backend = "off"
+        # Legacy env var promotion: SGLANG_USE_AITER_AR=1 on HIP -> aiter.
+        elif (
+            self.custom_all_reduce_backend == "auto"
+            and is_hip()
+            and get_bool_env_var("SGLANG_USE_AITER_AR", default="false")
+        ):
+            logger.info(
+                "Promoting custom_all_reduce_backend from 'auto' to 'aiter' "
+                "because SGLANG_USE_AITER_AR=1 is set on HIP."
+            )
+            self.custom_all_reduce_backend = "aiter"
         if self.debug_cuda_graph:
             if not is_cuda():
                 logger.warning(
@@ -4787,6 +4832,7 @@ class ServerArgs:
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
+        hip_hardware_platform = "HCU" if is_hcu() else "AMD"
 
         # Model and tokenizer
         parser.add_argument(
@@ -6008,6 +6054,30 @@ class ServerArgs:
             help="NSA decode backend. If not specified, auto-detects based on hardware and kv_cache_dtype.",
         )
         parser.add_argument(
+            "--pack-paged-kv-to-varlen",
+            type=str,
+            choices=["auto", "on", "off"],
+            default=ServerArgs.pack_paged_kv_to_varlen,
+            help=(
+                "Control the optional path that packs paged KV cache into "
+                "contiguous varlen K/V and calls upstream flash_attn_varlen_func. "
+                "'auto' uses shape/platform heuristics, 'on' bypasses performance "
+                "heuristics but keeps correctness guards, and 'off' disables it."
+            ),
+        )
+        parser.add_argument(
+            "--pack-paged-kv-to-varlen-min-kv-tokens",
+            type=int,
+            default=ServerArgs.pack_paged_kv_to_varlen_min_kv_tokens,
+            help="Minimum total KV tokens required by the packed paged-KV varlen auto policy.",
+        )
+        parser.add_argument(
+            "--pack-paged-kv-to-varlen-min-q-tokens",
+            type=int,
+            default=ServerArgs.pack_paged_kv_to_varlen_min_q_tokens,
+            help="Minimum query tokens required by the packed paged-KV varlen auto policy.",
+        )
+        parser.add_argument(
             "--fp8-gemm-backend",
             type=str,
             choices=FP8_GEMM_RUNNER_BACKEND_CHOICES,
@@ -6021,7 +6091,7 @@ class ServerArgs:
             "'flashinfer_deepgemm' (Hopper SM90 only; uses swapAB optimization for small M dimensions in decoding), "
             "'cutlass' (optimal for Hopper/Blackwell GPUs and high-throughput), "
             "'triton' (fallback, widely compatible), "
-            "'aiter' (AMD/ROCm or HCU/ROCm only). ",
+            f"'aiter' ({hip_hardware_platform}/ROCm only). ",
         )
         parser.add_argument(
             "--fp4-gemm-backend",
@@ -6529,6 +6599,7 @@ class ServerArgs:
                 "page_first_direct",
                 "page_first_kv_split",
                 "page_head",
+                "layout_hcu",
             ],
             default=ServerArgs.hicache_mem_layout,
             help="The layout of host memory pool for hierarchical cache.",
@@ -6773,6 +6844,21 @@ class ServerArgs:
             help="Disable the custom all-reduce kernel and fall back to NCCL.",
         )
         parser.add_argument(
+            "--custom-all-reduce-backend",
+            type=str,
+            default=ServerArgs.custom_all_reduce_backend,
+            choices=["auto", "native", "aiter", "off"],
+            help=(
+                "Choose the custom all-reduce backend. "
+                "'auto' picks aiter on HIP/HCU when available otherwise the "
+                "native SGLang implementation; 'native' forces the SGLang "
+                "kernel; 'aiter' forces the Hygon/HCU aiter kernel and, when "
+                "AITER_AR_TRANSPORT=fabric, fails hard rather than silently "
+                "falling back; 'off' disables custom all-reduce entirely. "
+                "--disable-custom-all-reduce overrides this and forces 'off'."
+            ),
+        )
+        parser.add_argument(
             "--enable-mscclpp",
             action="store_true",
             help="Enable using mscclpp for small messages for all-reduce kernel and fall back to NCCL.",
@@ -6785,7 +6871,7 @@ class ServerArgs:
         parser.add_argument(
             "--pre-warm-nccl",
             action="store_true",
-            help="Pre-warm NCCL/RCCL communicators during startup to reduce P99 TTFT cold-start latency. Default: enabled for AMD/HIP (RCCL), disabled for NVIDIA/CUDA (NCCL).",
+            help=f"Pre-warm NCCL/RCCL communicators during startup to reduce P99 TTFT cold-start latency. Default: enabled for {hip_hardware_platform}/HIP (RCCL), disabled for NVIDIA/CUDA (NCCL).",
         )
         parser.add_argument(
             "--disable-overlap-schedule",
@@ -6807,7 +6893,9 @@ class ServerArgs:
             action="store_true",
             help="With DP-attention, send control messages to every DP group leader "
             "and broadcast within attn_tp_group instead of the full tp_group. "
-            "Eliminates a costly all-ranks gloo sync on every scheduler iteration.",
+            "Eliminates a costly all-ranks gloo sync on every scheduler iteration. "
+            "Preferred: set SGLANG_ENABLE_DP_ATTENTION_LOCAL_CONTROL_BROADCAST=1 "
+            "(PD+DP does not require this flag).",
         )
         parser.add_argument(
             "--enable-dp-lm-head",
@@ -7031,6 +7119,11 @@ class ServerArgs:
             "--enable-attn-tp-input-scattered",
             action="store_true",
             help="Allow input of attention to be scattered when only using tensor parallelism, to reduce the computational load of operations such as qkv latent.",
+        )
+        parser.add_argument(
+            "--minimax-opt",
+            action="store_true",
+            help="Enable MiniMax M2 sequence-parallel prefill optimization over TP ranks.",
         )
         parser.add_argument(
             "--enable-nsa-prefill-context-parallel",

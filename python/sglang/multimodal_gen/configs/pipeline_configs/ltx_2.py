@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 import dataclasses
 from dataclasses import field
 from typing import Callable, Optional
@@ -195,6 +199,10 @@ class LTX2PipelineConfig(PipelineConfig):
             auto_disable_component_offload_min_available_memory_gb=70,
             auto_disable_component_offload_components=("dit",),
         )
+
+    def supports_dynamic_batching(self) -> bool:
+        """Allow text-only LTX batching; scheduler image_path gate rejects images."""
+        return True
 
     def prepare_latent_shape(self, batch, batch_size, num_frames):
         """Return unpacked latent shape [B, C, F, H, W]."""

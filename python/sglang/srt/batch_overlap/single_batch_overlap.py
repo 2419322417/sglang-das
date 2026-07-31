@@ -1,3 +1,17 @@
+# Copyright 2025 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Modifications Copyright 2026 Hygon Information Technology Co., Ltd.
 #
 # Hygon modifications to this file are licensed under the Apache License,
@@ -22,9 +36,9 @@ import torch
 from sglang.srt.environ import envs
 from sglang.srt.layers.moe import get_moe_runner_backend
 from sglang.srt.layers.moe.utils import is_sbo_enabled
-from sglang.srt.utils import is_blackwell, is_dcu
+from sglang.srt.utils import is_blackwell, is_hcu
 
-_is_dcu = is_dcu()
+_is_hcu = is_hcu()
 
 
 class SboFlags:
@@ -38,7 +52,7 @@ class SboFlags:
             and (
                 get_moe_runner_backend().is_flashinfer_cutedsl()
                 or (get_moe_runner_backend().is_deep_gemm() and not is_blackwell())
-                or _is_dcu
+                or _is_hcu
             )
         )
 

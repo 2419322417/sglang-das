@@ -19,6 +19,10 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+from sgl_kernel.kvcacheio import (
+    hcu_align_evict_mask_to_page_size,
+    hcu_create_extend_after_decode_spec_info,
+)
 
 from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
 from sglang.srt.distributed import get_tp_group
@@ -65,7 +69,7 @@ from sglang.srt.utils import (
     is_musa,
     next_power_of_2,
 )
-from sgl_kernel.kvcacheio import dcu_create_extend_after_decode_spec_info,dcu_assign_req_to_token_pool,dcu_align_evict_mask_to_page_size
+
 # _is_npu = is_npu()
 _is_hcu = is_hcu()
 if is_cuda() or is_musa():
@@ -106,8 +110,12 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
     seq_lens_sum: int
     seq_lens_cpu: torch.Tensor
     grammar: BaseGrammarObject = None
-    use_sglang_assign_req_to_token_pool = get_bool_env_var("SGLANG_ASSIGN_REQ_TO_TOKEN_POOL")
-    use_sglang_align_evict_mask_to_page_size = get_bool_env_var("SGLANG_ALIGN_EVICT_MASK_TO_PAGE_SIZE")
+    use_sglang_assign_req_to_token_pool = get_bool_env_var(
+        "SGLANG_ASSIGN_REQ_TO_TOKEN_POOL"
+    )
+    use_sglang_align_evict_mask_to_page_size = get_bool_env_var(
+        "SGLANG_ALIGN_EVICT_MASK_TO_PAGE_SIZE"
+    )
 
     # Shape info for padding
     num_tokens_per_req: int = -1  # -1 auto-fills from draft_token_num.
@@ -187,7 +195,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             bs,
         )
         # if self.use_sglang_assign_req_to_token_pool:
-        #     dcu_assign_req_to_token_pool(
+        #     hcu_assign_req_to_token_pool(
         #         req_pool_indices = batch.req_pool_indices,
         #         req_to_token = batch.req_to_token_pool.req_to_token,
         #         allocate_lens = batch.seq_lens,
@@ -538,12 +546,12 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             if self.topk == 1:
                 # Only evict full empty page. Do not evict partial empty page
                 if self.use_sglang_align_evict_mask_to_page_size:
-                    dcu_align_evict_mask_to_page_size(
-                        seq_lens = batch.seq_lens,
-                        evict_mask = evict_mask,
-                        page_size = page_size,
-                        num_draft_tokens = self.draft_token_num,
-                        bs = len(batch.seq_lens),
+                    hcu_align_evict_mask_to_page_size(
+                        seq_lens=batch.seq_lens,
+                        evict_mask=evict_mask,
+                        page_size=page_size,
+                        num_draft_tokens=self.draft_token_num,
+                        bs=len(batch.seq_lens),
                     )
                 else:
                     align_evict_mask_to_page_size[len(batch.seq_lens),](
@@ -604,7 +612,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             if page_size == 1 or self.topk == 1:
                 batch.out_cache_loc = batch.out_cache_loc[accept_index]
                 # if self.use_sglang_assign_req_to_token_pool:
-                #     dcu_assign_req_to_token_pool(
+                #     hcu_assign_req_to_token_pool(
                 #         req_pool_indices = batch.req_pool_indices,
                 #         req_to_token = batch.req_to_token_pool.req_to_token,
                 #         allocate_lens = batch.seq_lens,
@@ -661,7 +669,7 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
         else:
             if page_size == 1 or self.topk == 1:
                 # if self.use_sglang_assign_req_to_token_pool:
-                #     dcu_assign_req_to_token_pool(
+                #     hcu_assign_req_to_token_pool(
                 #         req_pool_indices = batch.req_pool_indices,
                 #         req_to_token = batch.req_to_token_pool.req_to_token,
                 #         allocate_lens = batch.seq_lens,
@@ -781,6 +789,10 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     # the worker copies it here for next iter's draft.
     bonus_tokens: torch.Tensor = None
 
+    # NSA MTP index share: per-request seed captured by draft-extend and reused
+    # by the first draft step.
+    mtp_topk_indices: Optional[torch.Tensor] = None
+
     # shape: (b + 1,)
     kv_indptr: torch.Tensor = None
     kv_indices: torch.Tensor = None
@@ -797,7 +809,9 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     num_correct_drafts: Optional[torch.Tensor] = None
     num_accept_tokens: Optional[torch.Tensor] = None
 
-    use_sglang_create_extend_after_decode_spec_info = get_bool_env_var("SGLANG_CREATE_EXTEND_AFTER_DECODE_SPEC_INFO", default="true")
+    use_sglang_create_extend_after_decode_spec_info = get_bool_env_var(
+        "SGLANG_CREATE_EXTEND_AFTER_DECODE_SPEC_INFO", default="true"
+    )
 
     def __post_init__(self):
         super().__init__(SpecInputType.EAGLE_DRAFT)
@@ -862,6 +876,10 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
     def filter_batch(self, new_indices: torch.Tensor, has_been_filtered: bool = True):
         if self.future_indices is not None:
             self.future_indices.indices = self.future_indices.indices[new_indices]
+            if self.future_indices.indices.numel() == 0:
+                # Empty future rows are the identity when merged with an
+                # active batch and therefore do not invalidate its seed.
+                self.future_indices.mtp_topk_indices_valid = True
             return
 
         strict_check = envs.SGLANG_SPEC_ENABLE_STRICT_FILTER_CHECK.get()
@@ -880,6 +898,8 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[: len(new_indices)]
             self.bonus_tokens = self.bonus_tokens[: len(new_indices)]
+            if self.mtp_topk_indices is not None:
+                self.mtp_topk_indices = self.mtp_topk_indices[: len(new_indices)]
         else:
             # in some cases(e.g draft_extend), we have not filtered the batch by `unfinished_index`
             self.topk_p = self.topk_p[new_indices]
@@ -887,14 +907,25 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             if self.hidden_states is not None:
                 self.hidden_states = self.hidden_states[new_indices]
             self.bonus_tokens = self.bonus_tokens[new_indices]
+            if self.mtp_topk_indices is not None:
+                self.mtp_topk_indices = self.mtp_topk_indices[new_indices]
 
     def merge_batch(self, spec_info: "EagleDraftInput"):
+        if (self.future_indices is None) != (spec_info.future_indices is None):
+            raise ValueError(
+                "Cannot merge resolved and unresolved Eagle draft inputs; "
+                "their MTP seed rows do not share a common lifecycle"
+            )
         if self.future_indices is not None:
             assert spec_info.future_indices is not None
             self.future_indices = FutureIndices(
                 indices=torch.cat(
                     [self.future_indices.indices, spec_info.future_indices.indices]
-                )
+                ),
+                mtp_topk_indices_valid=(
+                    self.future_indices.mtp_topk_indices_valid is True
+                    and spec_info.future_indices.mtp_topk_indices_valid is True
+                ),
             )
             return
 
@@ -906,6 +937,7 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
             self.bonus_tokens = spec_info.bonus_tokens
             self.topk_p = spec_info.topk_p
             self.topk_index = spec_info.topk_index
+            self.mtp_topk_indices = spec_info.mtp_topk_indices
             return
         if len(spec_info.topk_index) == 0:
             return
@@ -918,6 +950,14 @@ class EagleDraftInput(SpecInput, EagleDraftInputV2Mixin):
         )
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
         self.topk_index = torch.cat([self.topk_index, spec_info.topk_index])
+        if self.mtp_topk_indices is None or spec_info.mtp_topk_indices is None:
+            # A partially seeded batch has no request-to-row preserving tensor.
+            # Recompute the first draft step for the entire merged batch.
+            self.mtp_topk_indices = None
+        else:
+            self.mtp_topk_indices = torch.cat(
+                [self.mtp_topk_indices, spec_info.mtp_topk_indices]
+            )
 
 
 @dataclass
@@ -964,6 +1004,10 @@ class EagleDraftExtendInput(SpecInput):
     num_tokens_per_req: int = -1
     num_tokens_for_logprob_per_req: int = 1
 
+    use_sglang_create_extend_after_decode_spec_info = get_bool_env_var(
+        "SGLANG_CREATE_EXTEND_AFTER_DECODE_SPEC_INFO", default="true"
+    )
+
     def __post_init__(self):
         super().__init__(SpecInputType.EAGLE_DRAFT_EXTEND)
 
@@ -978,6 +1022,18 @@ class EagleDraftExtendInput(SpecInput):
         (e.g., STANDALONE)."""
         if worker.speculative_algorithm.is_standalone():
             return None
+
+        draft_runner = _draft_runner_of(worker)
+        draft_inner_model = getattr(draft_runner.model, "model", None)
+        if draft_inner_model is not None and hasattr(draft_inner_model, "hnorm"):
+            # NextN/MTP draft models feed spec_info.hidden_states through their
+            # own hnorm. The static graph buffer must therefore use the draft
+            # model width (times hc_mult for architectures that concatenate
+            # multiple hidden states), not the target spec hidden width.
+            draft_hidden_size = draft_runner.model_config.hidden_size
+            hc_mult = getattr(draft_inner_model, "hc_mult", 1)
+            return draft_hidden_size * hc_mult
+
         target_cfg = worker.target_worker.model_runner.model_config
         if not (
             worker.speculative_algorithm.is_eagle3()
@@ -1051,19 +1107,18 @@ class EagleDraftExtendInput(SpecInput):
 
         self.capture_hidden_mode = CaptureHiddenMode.LAST
         self.positions = torch.empty_like(batch.input_ids, dtype=torch.long)
-        self.verified_id = torch.empty_like(self.accept_length, dtype=torch.int32)
+        self.bonus_tokens = torch.empty_like(self.num_accept_tokens, dtype=torch.int32)
         if self.use_sglang_create_extend_after_decode_spec_info:
-            dcu_create_extend_after_decode_spec_info(
-                verified_id = batch.input_ids,
-                seq_lens = batch.seq_lens,
-                accept_lens = self.accept_length,
-                positions = self.positions,
-                new_verified_id = self.verified_id,
+            hcu_create_extend_after_decode_spec_info(
+                verified_id=batch.input_ids,
+                seq_lens=batch.seq_lens,
+                accept_lens=self.num_accept_tokens,
+                positions=self.positions,
+                new_verified_id=self.bonus_tokens,
                 # bs = max(speculative_num_steps + 1, len(batch.seq_lens)),
-                bs =len(batch.seq_lens),
+                bs=len(batch.seq_lens),
             )
         else:
-            self.bonus_tokens = torch.empty_like(self.num_accept_tokens, dtype=torch.int32)
             create_extend_after_decode_spec_info[(len(batch.seq_lens),)](
                 batch.input_ids,
                 batch.seq_lens,
