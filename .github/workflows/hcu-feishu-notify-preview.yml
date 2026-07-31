@@ -2,6 +2,17 @@ name: HCU Feishu Notification Preview
 
 on:
   workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Existing HCU nightly run ID to resend; empty sends preview data"
+        required: false
+        type: string
+        default: ""
+      source_run_attempt:
+        description: "Run attempt containing the shared accuracy results"
+        required: false
+        type: string
+        default: "1"
 
 permissions:
   contents: read
@@ -13,7 +24,7 @@ concurrency:
 jobs:
   preview:
     name: Send HCU accuracy card preview
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: hcu-ci-pr-2
     environment: hcu-ci-notify
     timeout-minutes: 10
     steps:
@@ -43,18 +54,70 @@ jobs:
         env:
           FEISHU_HCU_CI_WEBHOOK: ${{ secrets.FEISHU_HCU_CI_WEBHOOK }}
           FEISHU_HCU_CI_SIGNING_SECRET: ${{ secrets.FEISHU_HCU_CI_SIGNING_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          HCU_CI_IMAGE: ${{ vars.HCU_CI_IMAGE }}
           HCU_PREVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
         run: |
           set -euo pipefail
           python_bin="$(command -v python3.12 || command -v python3.10 || command -v python3.9 || command -v python3.8 || command -v python3)"
-          "${python_bin}" "${HCU_NOTIFY_SOURCE_DIR}/scripts/ci/hcu/hcu_ci_notify_feishu.py" \
-            --results-dir "${RUNNER_TEMP}/hcu-feishu-preview-unused" \
-            --branch "${GITHUB_REF_NAME}" \
-            --target-ref "${GITHUB_SHA}" \
-            --commit-sha "${GITHUB_SHA}" \
-            --image "notification-preview/no-model" \
-            --workflow-result "success" \
-            --run-url "${HCU_PREVIEW_RUN_URL}" \
-            --run-id "${GITHUB_RUN_ID}" \
-            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
-            --preview
+          notify_script="${HCU_NOTIFY_SOURCE_DIR}/scripts/ci/hcu/hcu_ci_notify_feishu.py"
+
+          if [[ -z "${SOURCE_RUN_ID}" ]]; then
+            "${python_bin}" "${notify_script}" \
+              --results-dir "${RUNNER_TEMP}/hcu-feishu-preview-unused" \
+              --branch "${GITHUB_REF_NAME}" \
+              --target-ref "${GITHUB_SHA}" \
+              --commit-sha "${GITHUB_SHA}" \
+              --image "notification-preview/no-model" \
+              --workflow-result "success" \
+              --run-url "${HCU_PREVIEW_RUN_URL}" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+              --preview
+            exit 0
+          fi
+
+          [[ "${SOURCE_RUN_ID}" =~ ^[0-9]+$ ]] || {
+            echo "source_run_id must be numeric" >&2
+            exit 2
+          }
+          [[ "${SOURCE_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "source_run_attempt must be a positive integer" >&2
+            exit 2
+          }
+          command -v gh >/dev/null
+          command -v jq >/dev/null
+
+          results_dir="/ci_public/sglang-das/hcu-accuracy/run-${SOURCE_RUN_ID}/attempt-${SOURCE_RUN_ATTEMPT}"
+          [[ -d "${results_dir}" ]] || {
+            echo "accuracy results do not exist: ${results_dir}" >&2
+            exit 2
+          }
+          status_file="$(find "${results_dir}" -mindepth 2 -maxdepth 2 -name partition-status.json | sort | head -n 1)"
+          [[ -n "${status_file}" ]] || {
+            echo "no partition status found under ${results_dir}" >&2
+            exit 2
+          }
+
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          source_branch="$(jq -er '.head_branch' <<<"${run_json}")"
+          source_sha="$(jq -er '.head_sha' <<<"${run_json}")"
+          source_result="$(jq -er '.conclusion // .status' <<<"${run_json}")"
+          source_url="$(jq -er '.html_url' <<<"${run_json}")"
+          target_ref="$(jq -r '.target_ref // empty' "${status_file}")"
+          image="$(jq -r '.image // empty' "${status_file}")"
+          target_ref="${target_ref:-${source_sha}}"
+          image="${image:-${HCU_CI_IMAGE:-unknown}}"
+
+          "${python_bin}" "${notify_script}" \
+            --results-dir "${results_dir}" \
+            --branch "${source_branch}" \
+            --target-ref "${target_ref}" \
+            --commit-sha "${source_sha}" \
+            --image "${image}" \
+            --workflow-result "${source_result}" \
+            --run-url "${source_url}" \
+            --run-id "${SOURCE_RUN_ID}" \
+            --run-attempt "${SOURCE_RUN_ATTEMPT}"
