@@ -174,7 +174,7 @@ jobs:
     outputs:
       wheel_urls: ${{ steps.wait.outputs.wheel_urls }}
     env:
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       CHECKOUT_REF: ${{ inputs.ref || github.sha }}
     steps:
@@ -226,7 +226,7 @@ jobs:
           import sys
           import time
 
-          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/home/github/sgl_whl_temp"))
+          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/ci_public/sglang-das/hcu-wheel-staging"))
           container_root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_CONTAINER_ROOT", "/hcu-wheel-staging"))
           target_sha = os.environ["HCU_WHEEL_TARGET_SHA"]
           short_sha = os.environ.get("HCU_WHEEL_TARGET_SHORT_SHA", target_sha[:12])
@@ -591,7 +591,7 @@ jobs:
       HCU_CI_SKIP_SGLANG_BUILD: ${{ vars.HCU_CI_SKIP_SGLANG_BUILD || '' }}
       HCU_CI_VISIBLE_DEVICES: ${{ matrix.visible_devices || vars.HCU_CI_VISIBLE_DEVICES || '' }}
       HCU_CI_INSTALL_WHEEL_URLS: ${{ needs.wait-hcu-wheels.outputs.wheel_urls || '' }}
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       HCU_CI_USE_INSTALLED_WHEELS: ${{ inputs.force_wheel_mode == true && '1' || '' }}
     steps:
