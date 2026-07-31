@@ -104,12 +104,10 @@ def process_weights_after_loading_aiter_w8a8_int8(layer: torch.nn.Module) -> Non
 
     moe_runner_config = getattr(layer, "moe_runner_config", None)
     if getattr(layer, "apply_router_weight_on_input", False) or (
-        moe_runner_config is not None
-        and moe_runner_config.apply_router_weight_on_input
+        moe_runner_config is not None and moe_runner_config.apply_router_weight_on_input
     ):
         raise RuntimeError(
-            "AITER W8A8 INT8 MoE does not support "
-            "apply_router_weight_on_input=True."
+            "AITER W8A8 INT8 MoE does not support " "apply_router_weight_on_input=True."
         )
 
     setattr(layer, "_aiter_w8a8_int8_original_w13_shape", tuple(layer.w13_weight.shape))
@@ -122,12 +120,10 @@ def process_weights_after_loading_aiter_w8a8_fp8(layer: torch.nn.Module) -> None
 
     moe_runner_config = getattr(layer, "moe_runner_config", None)
     if getattr(layer, "apply_router_weight_on_input", False) or (
-        moe_runner_config is not None
-        and moe_runner_config.apply_router_weight_on_input
+        moe_runner_config is not None and moe_runner_config.apply_router_weight_on_input
     ):
         raise RuntimeError(
-            "AITER FP8 W8A8 MoE does not support "
-            "apply_router_weight_on_input=True."
+            "AITER FP8 W8A8 MoE does not support " "apply_router_weight_on_input=True."
         )
 
     setattr(layer, "_aiter_w8a8_fp8_original_w13_shape", tuple(layer.w13_weight.shape))
@@ -353,7 +349,7 @@ def _get_aiter_w8a8_weights_for_solution(
     moe_config,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.moe import MoeSolutionType
-    from aiter.ops.shuffle import moe_layout_shuffle_gemm1, moe_layout_shuffle_gemm2
+    from aiter.ops.shuffle import moe_layout_shuffle_gemm2
 
     solution_type = moe_config.solution_type
     need_shuffle = getattr(
@@ -372,9 +368,7 @@ def _get_aiter_w8a8_weights_for_solution(
     if quant_info.moe_c_weight_layout:
         return quant_info.w13_weight, quant_info.w2_weight
 
-    cache_prefix = (
-        "_aiter_w8a8_fp8" if quant_info.use_fp8_w8a8 else "_aiter_w8a8_int8"
-    )
+    cache_prefix = "_aiter_w8a8_fp8" if quant_info.use_fp8_w8a8 else "_aiter_w8a8_int8"
     layer = quant_info.layer
 
     with torch.no_grad():
@@ -405,8 +399,7 @@ def _run_aiter_w8a8(
     assert not runner_config.no_combine, "no_combine=True is not supported by AITER"
     if runner_config.apply_router_weight_on_input:
         raise RuntimeError(
-            "AITER W8A8 MoE does not support "
-            "apply_router_weight_on_input=True."
+            "AITER W8A8 MoE does not support " "apply_router_weight_on_input=True."
         )
 
     hidden_states = runner_input.hidden_states
@@ -424,9 +417,7 @@ def _run_aiter_w8a8(
         activation,
         quant_info,
     )
-    w1, w2 = _get_aiter_w8a8_weights_for_solution(
-        quant_info, moe_config
-    )
+    w1, w2 = _get_aiter_w8a8_weights_for_solution(quant_info, moe_config)
     routed_scaling_factor = (
         runner_config.routed_scaling_factor
         if runner_config.routed_scaling_factor is not None
@@ -460,7 +451,6 @@ def _run_aiter_w8a8(
         gemm1_alpha=runner_config.gemm1_alpha,
         gemm1_limit=runner_config.gemm1_clamp_limit,
     )
-
     return AiterRunnerOutput(hidden_states=output)
 
 
