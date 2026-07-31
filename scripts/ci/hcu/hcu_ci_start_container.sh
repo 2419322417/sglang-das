@@ -37,6 +37,7 @@ set -euo pipefail
 
 CUSTOM_IMAGE=""
 CONTAINER="${HCU_CI_CONTAINER:-${HCU_CI_CONTAINER_NAME:-ci_sglang}}"
+NETWORK_MODE="${HCU_CI_NETWORK_MODE:-host}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -60,6 +61,14 @@ else
   echo "Set HCU_CI_IMAGE to a DTK/HCU enabled sglang dev image." >&2
   exit 1
 fi
+
+case "${NETWORK_MODE}" in
+  host|bridge) ;;
+  *)
+    echo "Error: unsupported HCU_CI_NETWORK_MODE=${NETWORK_MODE@Q}; expected host or bridge." >&2
+    exit 1
+    ;;
+esac
 
 echo "Using HCU image: ${IMAGE}"
 
