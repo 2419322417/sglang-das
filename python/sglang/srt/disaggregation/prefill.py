@@ -42,7 +42,7 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     get_kv_class,
     is_mla_backend,
-    poll_and_all_reduce_attn_cp_tp_group,
+    poll_and_all_reduce_by_rid_attn_cp_tp_group,
     prepare_abort,
     setup_state_kv_args,
 )
@@ -486,19 +486,21 @@ class PrefillBootstrapQueue:
         failed_reqs = []
         indices_to_remove = set()
 
-        if len(self.queue) == 0:
-            if return_failed_reqs is False:
-                return []
-            else:
-                return [], []
+        if rids_to_check is None:
+            status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+                [(req.rid, req.disagg_kv_sender) for req in self.queue],
+                self.scheduler.attn_cp_cpu_group,
+                self.scheduler.attn_tp_cpu_group,
+            )
+        else:
+            status_by_rid = {
+                req.rid: int(req.disagg_kv_sender.poll())
+                for req in self.queue
+                if req.rid in rids_to_check
+            }
 
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.queue],
-            self.scheduler.attn_cp_cpu_group,
-            self.scheduler.attn_tp_cpu_group,
-        )
-
-        for i, (req, poll) in enumerate(zip(self.queue, polls)):
+        for i, req in enumerate(self.queue):
+            poll = status_by_rid.get(req.rid, int(KVPoll.Bootstrapping))
             if rids_to_check is not None:
                 # if req not in reqs_info_to_check, skip
                 if req.rid not in rids_to_check:
@@ -726,6 +728,9 @@ class SchedulerDisaggregationPrefillMixin:
         for i, (req, next_token_id) in enumerate(
             zip(batch.reqs, next_token_ids, strict=True)
         ):
+            if self._finish_aborted_prefill_req(req):
+                continue
+
             if req.is_chunked <= 0:
                 req.time_stats.set_prefill_finished_time()
 
@@ -820,20 +825,28 @@ class SchedulerDisaggregationPrefillMixin:
         Poll the requests in the middle of transfer. If done, return the request.
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
-        if len(self.disagg_prefill_inflight_queue) == 0:
-            return []
-
         done_reqs = []
 
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
-            self.attn_cp_cpu_group,
-            self.attn_tp_cpu_group,
-        )
+        if rids_to_check is None:
+            status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+                [
+                    (req.rid, req.disagg_kv_sender)
+                    for req in self.disagg_prefill_inflight_queue
+                ],
+                self.attn_cp_cpu_group,
+                self.attn_tp_cpu_group,
+            )
+        else:
+            status_by_rid = {
+                req.rid: int(req.disagg_kv_sender.poll())
+                for req in self.disagg_prefill_inflight_queue
+                if req.rid in rids_to_check
+            }
 
         undone_reqs: List[Req] = []
         # Check .poll() for the reqs in disagg_prefill_inflight_queue. If Success, respond to the client and remove it from the queue
-        for req, poll in zip(self.disagg_prefill_inflight_queue, polls):
+        for req in self.disagg_prefill_inflight_queue:
+            poll = status_by_rid.get(req.rid, int(KVPoll.Bootstrapping))
 
             if rids_to_check is not None:
                 if req.rid not in rids_to_check:
@@ -929,15 +942,19 @@ class SchedulerDisaggregationPrefillMixin:
         """
         Used by PP, get the transferred rids but **do not pop**
         """
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
+        status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+            [
+                (req.rid, req.disagg_kv_sender)
+                for req in self.disagg_prefill_inflight_queue
+            ],
             self.attn_cp_cpu_group,
             self.attn_tp_cpu_group,
         )
 
         transferred_rids: List[str] = []
 
-        for req, poll in zip(self.disagg_prefill_inflight_queue, polls):
+        for req in self.disagg_prefill_inflight_queue:
+            poll = status_by_rid.get(req.rid, int(KVPoll.Bootstrapping))
             if poll == KVPoll.Success or poll == KVPoll.Failed:
                 transferred_rids.append(req.rid)
 
@@ -946,16 +963,36 @@ class SchedulerDisaggregationPrefillMixin:
     def process_prefill_chunk(self: Scheduler) -> None:
         chunked_req_to_exclude = set()
         if self.chunked_req:
-            chunked_req_to_exclude.add(self.chunked_req)
-            maybe_cache_unfinished_req(self.chunked_req, self.tree_cache, chunked=True)
-            if self.enable_overlap:
+            chunked_req = self.chunked_req
+            chunked_req_to_exclude.add(chunked_req)
+            abort_pending = chunked_req.to_finish is not None or isinstance(
+                chunked_req.finished_reason, FINISH_ABORT
+            )
+            if abort_pending or chunked_req.req_pool_idx is None:
+                logger.info(
+                    "Skip unfinished-cache for stale/aborted chunked prefill "
+                    "request. rid=%s abort_pending=%s req_pool_idx=%s",
+                    chunked_req.rid,
+                    abort_pending,
+                    chunked_req.req_pool_idx,
+                )
+                # The matching batch result owns final resource cleanup.
+                self.chunked_req = None
+            else:
+                maybe_cache_unfinished_req(
+                    chunked_req, self.tree_cache, chunked=True
+                )
+
+            if abort_pending or chunked_req.req_pool_idx is None:
+                self.running_batch.batch_is_full = False
+            elif self.enable_overlap:
                 # Delay KV transfer to process_batch_result_disagg_prefill when overlap is enabled to ensure results are resolved
-                self.chunked_req.tmp_end_idx = min(
-                    len(self.chunked_req.fill_ids),
-                    len(self.chunked_req.origin_input_ids),
+                chunked_req.tmp_end_idx = min(
+                    len(chunked_req.fill_ids),
+                    len(chunked_req.origin_input_ids),
                 )
             else:
-                self.send_kv_chunk(self.chunked_req)
+                self.send_kv_chunk(chunked_req)
             self.running_batch.batch_is_full = False
 
         if self.last_batch and self.last_batch.forward_mode.is_extend():
@@ -970,6 +1007,28 @@ class SchedulerDisaggregationPrefillMixin:
             )
             if self.last_batch.batch_size() < last_bs:
                 self.running_batch.batch_is_full = False
+
+    def _finish_aborted_prefill_req(self: Scheduler, req: Req) -> bool:
+        if getattr(req, "_prefill_abort_cleanup_done", False):
+            return True
+
+        if req.to_finish is not None:
+            req.finished_reason = req.to_finish
+            req.to_finish = None
+
+        if not isinstance(req.finished_reason, FINISH_ABORT):
+            return False
+
+        if hasattr(req.disagg_kv_sender, "abort"):
+            req.disagg_kv_sender.abort()
+        if req.req_pool_idx is not None:
+            release_kv_cache(req, self.tree_cache)
+        release_req_to_metadata_buffer(
+            req, self.req_to_metadata_buffer_idx_allocator
+        )
+        req._prefill_abort_cleanup_done = True
+        self.stream_output([req], req.return_logprob, None)
+        return True
 
     def send_kv_chunk(
         self: Scheduler,

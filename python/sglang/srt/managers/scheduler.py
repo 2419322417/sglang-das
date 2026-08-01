@@ -181,7 +181,7 @@ from sglang.srt.managers.scheduler_input_blocker import SchedulerInputBlocker
 from sglang.srt.managers.scheduler_output_processor_mixin import (
     SchedulerOutputProcessorMixin,
 )
-from sglang.srt.managers.scheduler_pp_mixin import SchedulerPPMixin
+from sglang.srt.managers.scheduler_pp_mixin import PP_REQUEST_TAG, SchedulerPPMixin
 from sglang.srt.managers.scheduler_profiler_mixin import SchedulerProfilerMixin
 from sglang.srt.managers.scheduler_recv_skipper import SchedulerRecvSkipper
 from sglang.srt.managers.scheduler_runtime_checker_mixin import (
@@ -755,6 +755,11 @@ class Scheduler(
         self.tp_cpu_group = self.tp_group.cpu_group
         self.attn_tp_group = get_attention_tp_group()
         self.attn_tp_cpu_group = self.attn_tp_group.cpu_group
+        self.pp_control_ack_tp_cpu_group = torch.distributed.new_group(
+            ranks=self.attn_tp_group.ranks,
+            backend="gloo",
+            use_local_synchronization=True,
+        )
         self.attn_cp_group = get_attention_cp_group()
         self.attn_cp_cpu_group = self.attn_cp_group.cpu_group
         self.pp_group = get_pp_group()
@@ -1776,6 +1781,7 @@ class Scheduler(
                     self.world_group.cpu_group,
                     (self.pp_rank - 1) * self.tp_size + dp_offset,
                     self.pp_rank * self.tp_size + dp_offset,
+                    tag=PP_REQUEST_TAG,
                 )
             else:
                 recv_reqs = None
@@ -3001,8 +3007,17 @@ class Scheduler(
             old_mamba_available = (
                 mamba_pool.available_size() if mamba_pool is not None else None
             )
+            allow_retract_all = (
+                kv_full_retract_flag
+                and self.server_args.disaggregation_mode == "decode"
+                and self.pp_size > 1
+                and any(
+                    running_batch is not batch and not running_batch.is_empty()
+                    for running_batch in getattr(self, "running_mbs", ())
+                )
+            )
             retracted_reqs, new_token_ratio, reqs_to_abort = batch.retract_decode(
-                self.server_args
+                self.server_args, allow_retract_all=allow_retract_all
             )
             new_available_tokens = self.token_to_kv_pool_allocator.available_size()
             new_token_gained = new_available_tokens - old_available_tokens

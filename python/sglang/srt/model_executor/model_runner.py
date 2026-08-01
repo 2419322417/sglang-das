@@ -3432,6 +3432,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
         can_run_graph = bool(
             mode_check()
+            and not forward_batch.disable_cuda_graph
             and self.graph_runner
             and self.graph_runner.can_run(forward_batch)
         )
