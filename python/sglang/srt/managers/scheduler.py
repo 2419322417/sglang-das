@@ -2805,7 +2805,9 @@ class Scheduler(
                 )
 
         # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        # Iterate over a copy so we can safely remove too-large requests
+        # from the original waiting_queue during iteration.
+        for req in list(self.waiting_queue):
             if self.enable_lora and not self._can_schedule_lora_req(req, running_loras):
                 continue
 
@@ -2854,6 +2856,47 @@ class Scheduler(
                         ) > 0 or (not self.running_batch.is_empty())
                     else:
                         self.running_batch.batch_is_full = True
+
+                # If no request has been added to this batch yet and the
+                # running batch is empty, the pool is at its maximum free
+                # capacity. A failure here means this request is too large
+                # to ever fit — abort it, remove it from the waiting queue,
+                # and try the next request instead of dead-looping.
+                if (
+                    len(adder.can_run_list) == 0
+                    and len(self.running_batch.reqs) == 0
+                    and self.chunked_req is None
+                ):
+                    error_msg = (
+                        f"Request {req.rid} exceeds the available KV cache pool "
+                        f"capacity (extend_input_len={req.extend_input_len}, "
+                        f"rem_total_tokens={adder.rem_total_tokens}"
+                        + (
+                            f", rem_swa_tokens={adder.rem_swa_tokens}"
+                            if getattr(adder, "is_hybrid_swa", False)
+                            else ""
+                        )
+                        + f"). "
+                        f"Aborting to unblock the scheduler. "
+                        f"Consider increasing --mem-fraction-static or "
+                        f"--swa-full-tokens-ratio (default 0.8). "
+                        f"Result: {res}"
+                    )
+                    logger.error(error_msg)
+                    self.send_to_tokenizer.send_output(
+                        AbortReq(
+                            finished_reason={
+                                "type": "abort",
+                                "status_code": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                                "message": error_msg,
+                            },
+                            rid=req.rid,
+                        ),
+                        req,
+                    )
+                    self.waiting_queue.remove(req)
+                    continue
+
                 # revert matched mamba idx to avoid memory leak, if req is not added.
                 # Only free if the slot was freshly allocated in this batch (not
                 # pre-existing from a session). Session-held slots have their own
