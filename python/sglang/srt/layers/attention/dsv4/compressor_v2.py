@@ -272,6 +272,10 @@ def create_paged_compressor_data(
 
     swa_page_size = token_to_kv_pool.swa_page_size
     ring_size = token_to_kv_pool.get_ring_size(compress_ratio=compress_ratio)
+    request_scoped_c128_state = (
+        compress_ratio == 128
+        and envs.SGLANG_DSV4_REQUEST_SCOPED_C128_STATE.get()
+    )
     # NOTE: This is actually a proxy, which encounter some bug with tvm-ffi.
     # As a workaround, we use `.detach()` to get the real tensor.
     full_to_swa = token_to_kv_pool.full_to_swa_index_mapping.detach()
@@ -300,6 +304,7 @@ def create_paged_compressor_data(
             ring_size=ring_size,
             num_q_tokens=num_q_tokens,
             use_cuda_graph=use_prefill_cuda_graph,
+            request_scoped_c128_state=request_scoped_c128_state,
         )
     else:
         return CompressorDecodePlan.generate(
@@ -310,6 +315,7 @@ def create_paged_compressor_data(
             seq_lens=seq_lens.to(torch.int64),
             swa_page_size=swa_page_size,
             ring_size=ring_size,
+            request_scoped_c128_state=request_scoped_c128_state,
         )
 
 

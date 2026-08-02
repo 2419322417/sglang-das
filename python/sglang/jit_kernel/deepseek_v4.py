@@ -761,6 +761,7 @@ def create_paged_compress_data_kernel(
     is_overlap: tl.constexpr,
     swa_page_size: tl.constexpr,
     ring_size: tl.constexpr,
+    request_scoped_c128_state: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     pid = tl.program_id(0)
@@ -792,18 +793,21 @@ def create_paged_compress_data_kernel(
         else:
             pos = write_overlap_pos
         pos = tl.maximum(pos, 0)
-        loc = tl.load(
-            req_to_token_ptr
-            + rid.to(tl.int64) * stride_req_to_token_0
-            + pos.to(tl.int64) * stride_req_to_token_1,
-            mask=mask,
-            other=0,
-        ).to(tl.int32)
-        swa_loc = tl.load(full_to_swa_index_mapping_ptr + loc, mask=mask, other=0).to(
-            tl.int32
-        )
-        swa_page = swa_loc // swa_page_size
-        state_loc = swa_page * ring_size + (swa_loc % ring_size)
+        if request_scoped_c128_state and compress_ratio == 128:
+            state_loc = rid * ring_size + (pos % ring_size)
+        else:
+            loc = tl.load(
+                req_to_token_ptr
+                + rid.to(tl.int64) * stride_req_to_token_0
+                + pos.to(tl.int64) * stride_req_to_token_1,
+                mask=mask,
+                other=0,
+            ).to(tl.int32)
+            swa_loc = tl.load(
+                full_to_swa_index_mapping_ptr + loc, mask=mask, other=0
+            ).to(tl.int32)
+            swa_page = swa_loc // swa_page_size
+            state_loc = swa_page * ring_size + (swa_loc % ring_size)
         state_loc = state_loc // cr
         if i == 0:
             v0 = state_loc
@@ -838,6 +842,7 @@ def triton_create_paged_compress_data(
     extend_seq_lens: torch.Tensor,
     req_to_token: torch.Tensor,
     full_to_swa_index_mapping: torch.Tensor,
+    request_scoped_c128_state: bool = False,
     block: int = 128,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     batch_size = req_pool_indices.shape[0]
@@ -863,6 +868,7 @@ def triton_create_paged_compress_data(
         is_overlap=1 if is_overlap else 0,
         swa_page_size=swa_page_size,
         ring_size=ring_size,
+        request_scoped_c128_state=request_scoped_c128_state,
         BLOCK=block,
     )
 

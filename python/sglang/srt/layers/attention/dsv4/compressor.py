@@ -258,6 +258,10 @@ def create_paged_compressor_data(
 ) -> FusedCompressMetadata:
     swa_page_size = token_to_kv_pool.swa_page_size
     ring_size = token_to_kv_pool.get_ring_size(compress_ratio=compress_ratio)
+    request_scoped_c128_state = (
+        compress_ratio == 128
+        and envs.SGLANG_DSV4_REQUEST_SCOPED_C128_STATE.get()
+    )
     # assert ring_size % compress_ratio == 0
 
     def clip_down(positions: torch.Tensor) -> torch.Tensor:
@@ -265,10 +269,13 @@ def create_paged_compressor_data(
 
     def get_raw_loc(positions: torch.Tensor) -> torch.Tensor:
         positions = positions.masked_fill(positions < 0, 0)
-        loc = req_to_token[req_pool_indices, positions]
-        swa_loc = token_to_kv_pool.translate_loc_from_full_to_swa(loc)
-        swa_pages = swa_loc // swa_page_size
-        state_loc = swa_pages * ring_size + swa_loc % ring_size
+        if request_scoped_c128_state:
+            state_loc = req_pool_indices * ring_size + positions % ring_size
+        else:
+            loc = req_to_token[req_pool_indices, positions]
+            swa_loc = token_to_kv_pool.translate_loc_from_full_to_swa(loc)
+            swa_pages = swa_loc // swa_page_size
+            state_loc = swa_pages * ring_size + swa_loc % ring_size
         return (state_loc // compress_ratio).to(torch.int32)
 
     is_overlap = is_overlap_compress(compress_ratio)
@@ -285,6 +292,7 @@ def create_paged_compressor_data(
             extend_seq_lens=extend_lens,
             req_to_token=req_to_token,
             full_to_swa_index_mapping=token_to_kv_pool.full_to_swa_index_mapping,
+            request_scoped_c128_state=request_scoped_c128_state,
         )
 
         plan_kwargs: dict
