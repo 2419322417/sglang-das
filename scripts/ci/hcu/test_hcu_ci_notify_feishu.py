@@ -329,7 +329,7 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertIn(key, collected.missing_models)
             self.assertGreaterEqual(len(collected.diagnostics), 2)
 
-    def test_failed_matrix_with_complete_scores_is_orange(self):
+    def test_failed_non_accuracy_matrix_with_complete_scores_is_green(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _write_complete_results(root)
@@ -343,10 +343,39 @@ class ResultCollectionTest(unittest.TestCase):
                 workflow_result="failure",
                 run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/3",
             )
+            self.assertEqual(card["header"]["template"], "green")
+            self.assertIn(
+                f"本次 {len(notify.EXPECTED_MODELS)} 个模型全部达到阈值",
+                card["body"]["elements"][0]["text"]["content"],
+            )
+
+    def test_failed_accuracy_partition_with_complete_scores_is_orange(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_complete_results(root)
+            _write_partition_status(
+                root / "artifact-0",
+                "accuracy-text-0",
+                "failure",
+            )
+            collected = notify.collect_results(root)
+            card = notify.build_card(
+                collected,
+                branch="0713-hcu-sglang-test",
+                target_ref="0713-hcu-sglang-test",
+                commit_sha="c" * 40,
+                image="example/sglang:test",
+                workflow_result="success",
+                run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/3",
+            )
             self.assertEqual(card["header"]["template"], "orange")
             self.assertIn(
                 "本次结果状态不完整",
                 card["body"]["elements"][0]["text"]["content"],
+            )
+            self.assertEqual(
+                collected.failed_partitions,
+                {"accuracy-text-0": "failure"},
             )
 
     def test_preview_is_clearly_labeled_and_uses_all_models(self):
