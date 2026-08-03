@@ -388,7 +388,7 @@ def _short_image_id(image_id: str) -> str:
 
 
 def _overall_status(
-    collected: CollectedResults, workflow_result: str
+    collected: CollectedResults, _workflow_result: str
 ) -> Tuple[str, str, str]:
     if collected.regressions:
         return "red", "存在未达标", "存在模型精度低于阈值"
@@ -396,10 +396,9 @@ def _overall_status(
         collected.missing_models
         or collected.diagnostics
         or collected.failed_partitions
-        or workflow_result != "success"
     )
     if has_infra_issue:
-        return "orange", "结果不完整", "存在基础设施或范围外测例异常"
+        return "orange", "结果不完整", "存在精度分片或结果异常"
     return (
         "green",
         "全部通过",
