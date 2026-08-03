@@ -1,15 +1,20 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 import torch
+from flash_attn import flash_attn_func as flash_attn_func_interface
 
 from sglang.multimodal_gen.runtime.layers.utils import register_custom_op
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
 )
+from sglang.srt.layers.attention.flashattention_interface import flash_attn_varlen_func
 
 # try:
 #     from sgl_kernel.flash_attn import flash_attn_varlen_func
@@ -26,8 +31,6 @@ from sglang.multimodal_gen.runtime.platforms import (
 # except ImportError as e:
 #     raise e
 
-from flash_attn import flash_attn_func as flash_attn_func_interface
-from sglang.srt.layers.attention.flashattention_interface import flash_attn_varlen_func
 
 flash_attn_func = flash_attn_varlen_func
 
@@ -400,7 +403,9 @@ class FlashAttentionImpl(AttentionImpl):
         *,
         return_softmax_lse: bool = False,
     ):
-        assert query.ndim == 4, f"Expected fixed length fa ndim == 4, but got {query.ndim}"
+        assert (
+            query.ndim == 4
+        ), f"Expected fixed length fa ndim == 4, but got {query.ndim}"
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is not None:

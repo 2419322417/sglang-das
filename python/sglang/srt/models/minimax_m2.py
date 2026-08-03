@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +18,8 @@
 # Adapted from DeepSeek and Mixtral implementation
 """Inference-only MiniMax M2 model compatible with HuggingFace weights."""
 
-import os
 import logging
+import os
 from contextlib import nullcontext
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -118,7 +121,7 @@ _is_npu = is_npu()
 
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 
 if _is_hcu:
     from lightop.rmsnorm import fused_rms_norm_contiguous
@@ -332,15 +335,15 @@ class MiniMaxM2RMSNormTP(nn.Module):
             self.num_heads = num_heads
             self.num_head_replicas = 1
         elif self.attn_tp_size >= num_heads:
-            assert self.attn_tp_size % num_heads == 0, (
-                f"attn_tp_size ({self.attn_tp_size}) must be divisible by num_heads ({num_heads})"
-            )
+            assert (
+                self.attn_tp_size % num_heads == 0
+            ), f"attn_tp_size ({self.attn_tp_size}) must be divisible by num_heads ({num_heads})"
             self.num_heads = 1
             self.num_head_replicas = self.attn_tp_size // num_heads
         else:
-            assert num_heads % self.attn_tp_size == 0, (
-                f"num_heads ({num_heads}) must be divisible by attn_tp_size ({self.attn_tp_size})"
-            )
+            assert (
+                num_heads % self.attn_tp_size == 0
+            ), f"num_heads ({num_heads}) must be divisible by attn_tp_size ({self.attn_tp_size})"
             self.num_heads = num_heads // self.attn_tp_size
             self.num_head_replicas = 1
 
@@ -993,9 +996,9 @@ class MiniMaxM2Attention(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ):
         if hidden_states.shape[0] == 0:
-            assert not self.o_proj.reduce_results, (
-                "short-circuiting allreduce will lead to hangs"
-            )
+            assert (
+                not self.o_proj.reduce_results
+            ), "short-circuiting allreduce will lead to hangs"
             return hidden_states, forward_batch, None
         qkv, _ = self.qkv_proj(hidden_states, rms_weight=rms_weight, residual=residual)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -1058,9 +1061,9 @@ class MiniMaxM2Attention(nn.Module):
         forward_batch: ForwardBatch,
     ):
         if hidden_states.shape[0] == 0:
-            assert not self.o_proj.reduce_results, (
-                "short-circuiting allreduce will lead to hangs"
-            )
+            assert (
+                not self.o_proj.reduce_results
+            ), "short-circuiting allreduce will lead to hangs"
             return hidden_states, forward_batch, None
         qkv, _ = self.qkv_proj(hidden_states)
         if self.use_qk_norm:

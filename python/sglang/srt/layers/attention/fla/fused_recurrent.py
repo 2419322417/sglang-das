@@ -1,5 +1,9 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/gated_delta_rule/fused_recurrent.py
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
@@ -404,7 +408,10 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             num_stages=num_stages,
         )
     else:
-        from aiter.ops.triton.fla.fused_recurrent import fused_recurrent_gated_delta_rule_packed_decode as aiter_fused_recurrent_gated_delta_rule_packed_decode
+        from aiter.ops.triton.fla.fused_recurrent import (
+            fused_recurrent_gated_delta_rule_packed_decode as aiter_fused_recurrent_gated_delta_rule_packed_decode,
+        )
+
         aiter_fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv,
             a=a,

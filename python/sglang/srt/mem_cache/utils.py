@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2025 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,10 +34,10 @@ from sglang.kernels.ops.kvcache.mla_buffer import (
     set_mla_kv_buffer_triton as set_mla_kv_buffer_triton,
 )
 from sglang.kernels.ops.kvcache.mla_buffer import (
-    set_mla_kv_buffer_triton_masked as set_mla_kv_buffer_triton_masked,
+    set_mla_kv_buffer_triton_fp8_quant as set_mla_kv_buffer_triton_fp8_quant,
 )
 from sglang.kernels.ops.kvcache.mla_buffer import (
-    set_mla_kv_buffer_triton_fp8_quant as set_mla_kv_buffer_triton_fp8_quant,
+    set_mla_kv_buffer_triton_masked as set_mla_kv_buffer_triton_masked,
 )
 from sglang.kernels.ops.kvcache.mla_buffer import (
     set_mla_kv_scale_buffer_kernel as set_mla_kv_scale_buffer_kernel,

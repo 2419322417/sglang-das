@@ -750,6 +750,8 @@ class TboForwardBatchPreparer:
             "orig_seq_lens",  # only used by qwen-1m, thus not care
             "return_pooled_hidden_states",
             "reuse_dsa_topk_indices",  # forward-level flag, inherited by both child batches
+            # mHC target models need pre-hc-head hidden states during target verify.
+            "return_hidden_states_before_norm",
         ]:
             output_dict[key] = getattr(batch, key)
 
@@ -811,7 +813,6 @@ class TboForwardBatchPreparer:
                 top_logprobs_nums=None,
                 token_ids_logprobs=None,
                 next_token_logits_buffer=None,
-                return_hidden_states_before_norm=False,
                 # TBO children start unplanned — planned by the TBO-aware init
                 # flow; a stale parent "ready" would wrongly skip that.
                 forward_metadata_ready=False,
@@ -846,8 +847,10 @@ class TboForwardBatchPreparer:
         # TODO we may make padding on both sub-batches to make it slightly more balanced
         value_a = min(tbo_split_token_index, num_token_non_padded)
         value_b = max(0, num_token_non_padded - tbo_split_token_index)
-        return torch.tensor([value_a, value_b], dtype=torch.int32).pin_memory().to(
-            device=get_server_args().device, non_blocking=True
+        return (
+            torch.tensor([value_a, value_b], dtype=torch.int32)
+            .pin_memory()
+            .to(device=get_server_args().device, non_blocking=True)
         )
 
     @classmethod

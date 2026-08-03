@@ -1,4 +1,7 @@
 # coding=utf-8
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2026 The HunYuan team.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +18,9 @@
 from typing import Iterable, Optional, Tuple
 
 import torch
+from torch import nn
+from transformers import PretrainedConfig
+
 from sglang.srt.distributed import (
     get_attn_tensor_model_parallel_rank,
     get_attn_tensor_model_parallel_world_size,
@@ -69,8 +75,6 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import get_bool_env_var, is_cuda, is_hcu, make_layers
 from sglang.srt.utils.common import LazyValue
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
-from torch import nn
-from transformers import PretrainedConfig
 
 _is_hcu = is_hcu()
 _use_fused_hunyuan_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
@@ -846,9 +850,7 @@ class HYV3ForCausalLM(nn.Module):
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
                 layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
-                for layer_id in range(
-                    self.model.start_layer, self.model.end_layer
-                )
+                for layer_id in range(self.model.start_layer, self.model.end_layer)
                 if isinstance(self.model.layers[layer_id].mlp, HYV3MoEFused)
             }
         )

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2025 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -298,9 +301,7 @@ def enable_fused_set_kv_buffer(forward_batch: ForwardBatch):
     if _is_hcu:
         return cuda_enabled
     return cuda_enabled or (
-        _is_hip
-        and not is_prefill_context_parallel_enabled()
-        and dcp_kv_mask is None
+        _is_hip and not is_prefill_context_parallel_enabled() and dcp_kv_mask is None
     )
 
 

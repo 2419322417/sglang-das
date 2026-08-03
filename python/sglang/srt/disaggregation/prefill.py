@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 """
 Life cycle of a request in the prefill server
 
@@ -173,6 +177,7 @@ class PrefillBootstrapQueue:
                     "DeepSeek-V4 PD prefill admission uses legacy SWA pool cap: %d",
                     self.max_total_num_tokens,
                 )
+
     def _init_kv_manager(self) -> CommonKVManager:
         kv_args_class = get_kv_class(self.transfer_backend, KVClassType.KVARGS)
         kv_args = kv_args_class()

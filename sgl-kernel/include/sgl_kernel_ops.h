@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 /* Copyright 2025 SGLang Team. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,8 +25,8 @@ limitations under the License.
 #include <torch/library.h>
 #include <torch/torch.h>
 
-#include <tuple>
 #include <optional>
+#include <tuple>
 #include <vector>
 
 #include "scalar_type.hpp"
@@ -124,7 +127,7 @@ void normal_decode_metadata_general(
     int64_t page_size,
     int64_t seq_len_delta,
     bool use_swa);
-    
+
 /*
  * From csrc/infllm_v2
  */
@@ -504,11 +507,7 @@ void segment_packbits(
  * From csrc/kvcacheio
  */
 void hcu_align_evict_mask_to_page_size(
-    const at::Tensor seq_lens_ptr,
-    at::Tensor evict_mask_ptr,
-    int64_t page_size,
-    int64_t num_draft_tokens,
-    int64_t bs);
+    const at::Tensor seq_lens_ptr, at::Tensor evict_mask_ptr, int64_t page_size, int64_t num_draft_tokens, int64_t bs);
 
 void hcu_create_extend_after_decode_spec_info(
     const at::Tensor verified_id,
@@ -535,7 +534,7 @@ void hcu_create_flashmla_kv_indices(
     at::Tensor& kv_indices,
     int64_t req_to_token_stride,
     int64_t kv_indices_stride,
-    int64_t PAGED_SIZE);    
+    int64_t PAGED_SIZE);
 
 void hcu_assign_extend_cache_locs(
     const at::Tensor req_pool_indices,
@@ -546,11 +545,8 @@ void hcu_assign_extend_cache_locs(
     int64_t pool_len,
     int64_t bs);
 
-
-at::Tensor hcu_get_last_loc(
-    const at::Tensor req_to_token,     
-    const at::Tensor req_pool_indices,  
-    const at::Tensor prefix_lens);
+at::Tensor
+hcu_get_last_loc(const at::Tensor req_to_token, const at::Tensor req_pool_indices, const at::Tensor prefix_lens);
 
 void hcu_assign_req_to_token_pool(
     const at::Tensor req_pool_indices_ptr,
@@ -571,11 +567,11 @@ void hcu_alloc_extend_kernel(
     int64_t page_size);
 
 void hcu_alloc_decode_kernel(
-    const at::Tensor seq_lens_ptr,   
-    const at::Tensor last_loc_ptr,    
-    const at::Tensor free_page_ptr,   
-    at::Tensor out_indices, 
-    int64_t bs,          
+    const at::Tensor seq_lens_ptr,
+    const at::Tensor last_loc_ptr,
+    const at::Tensor free_page_ptr,
+    at::Tensor out_indices,
+    int64_t bs,
     int64_t page_size);
 
 void transfer_kv_all_kernel_lf_pf_D2H_hcu(

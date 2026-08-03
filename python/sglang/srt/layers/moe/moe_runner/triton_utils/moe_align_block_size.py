@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -35,6 +35,7 @@ if _is_cuda or _is_hip or _is_xpu or _is_musa:
 
 if _is_hcu:
     from lightop import op
+
 
 def moe_align_block_size(
     topk_ids: torch.Tensor,
@@ -141,7 +142,7 @@ def hcu_moe_align_block_size(
     expert_map: Optional[torch.Tensor] = None,
     pad_sorted_ids: bool = False,
     num_token: Optional[int] = None,
-    expert_mask: Optional[torch.Tensor] = None
+    expert_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -194,44 +195,64 @@ def hcu_moe_align_block_size(
     """
     if num_token:
         if num_token < block_size:
-            max_num_tokens_padded = min(topk_ids.numel() * block_size, topk_ids.numel() + num_experts * (block_size - 1))
+            max_num_tokens_padded = min(
+                topk_ids.numel() * block_size,
+                topk_ids.numel() + num_experts * (block_size - 1),
+            )
         else:
             max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-        sorted_ids = torch.full((max_num_tokens_padded,), fill_value=topk_ids.numel(), dtype=torch.int32, device=topk_ids.device)
+        sorted_ids = torch.full(
+            (max_num_tokens_padded,),
+            fill_value=topk_ids.numel(),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
     else:
         max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
         if pad_sorted_ids:
             max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-        sorted_ids = torch.empty((max_num_tokens_padded, ),
-                                 dtype=torch.int32,
-                                 device=topk_ids.device)
+        sorted_ids = torch.empty(
+            (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+        )
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
     if expert_map is not None:
-        expert_ids = torch.zeros((max_num_m_blocks, ),
-                                dtype=torch.int32,
-                                device=topk_ids.device)
+        expert_ids = torch.zeros(
+            (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+        )
     else:
-        expert_ids = torch.empty((max_num_m_blocks, ),
-                                dtype=torch.int32,
-                                device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1),
-                                      dtype=torch.int32,
-                                      device=topk_ids.device)
+        expert_ids = torch.empty(
+            (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+        )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
 
     if expert_mask is not None:
-        op.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                                expert_ids, num_tokens_post_pad,
-                                expert_map = expert_map,
-                                expert_mask = expert_mask,
-                                num_local_tokens = None,
-                                Is_fuse_fill = True)
+        op.moe_align_block_size_out(
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+            expert_map=expert_map,
+            expert_mask=expert_mask,
+            num_local_tokens=None,
+            is_ep=False,
+            is_fuse_fill=True,
+        )
     else:
-        op.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                            expert_ids, num_tokens_post_pad,
-                            expert_map = None,
-                            expert_mask = None,
-                            num_local_tokens = None,
-                            Is_fuse_fill = True)
+        op.moe_align_block_size_out(
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+            expert_map=None,
+            expert_mask=None,
+            num_local_tokens=None,
+            is_ep=False,
+            is_fuse_fill=True,
+        )
         if expert_map is not None:
             expert_ids = expert_map[expert_ids]
 

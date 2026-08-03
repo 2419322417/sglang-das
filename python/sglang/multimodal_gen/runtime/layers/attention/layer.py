@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
@@ -48,7 +51,8 @@ from sglang.multimodal_gen.runtime.layers.usp import (
     _usp_input_all_to_all_varlen,
     _usp_output_all_to_all,
     _usp_output_all_to_all_varlen,
-    ring_attn,)
+    ring_attn,
+)
 from sglang.multimodal_gen.runtime.managers.forward_context import (
     ForwardContext,
     get_forward_context,

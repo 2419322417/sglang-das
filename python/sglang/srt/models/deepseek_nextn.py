@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -155,7 +158,7 @@ class DeepseekModelNextN(nn.Module):
 
         self.alt_stream = (
             torch.cuda.Stream()
-            if _is_cuda or envs.SGLANG_NPU_USE_MULTI_STREAM.get() or is_sbo_enabled() 
+            if _is_cuda or envs.SGLANG_NPU_USE_MULTI_STREAM.get() or is_sbo_enabled()
             else None
         )
 

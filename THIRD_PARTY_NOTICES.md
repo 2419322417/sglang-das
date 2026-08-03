@@ -4,6 +4,7 @@
 
 - Source: https://github.com/sgl-project/sglang
 - Upstream version: v0.5.12
+- Fixed source commit: `25f2e430acb914c793307a5139b9b2a2055a2547`
 - License: Apache License, Version 2.0
 - Original copyright: Copyright 2023-2024 SGLang Team
 - Hygon modifications: HCU platform adaptations, build scripts, dependency adjustments, performance optimizations, and documentation updates.

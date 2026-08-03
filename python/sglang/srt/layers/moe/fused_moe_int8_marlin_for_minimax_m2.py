@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and limitations.
 
 from typing import List, Optional
-import vllm.envs as envs
-from vllm import _custom_ops as ops
+
 import torch
 import triton
 import triton.language as tl
-import lmslim.envs as lsenvs
+import vllm.envs as envs
+from lightop import envs as lsenvs
+from vllm import _custom_ops as ops
 
 use_lightop = lsenvs.LMSLIM_USE_LIGHTOP
 device_name = lsenvs.LMSLIM_GPU_NAME
@@ -32,9 +33,12 @@ if use_lightop:
     )
     from lightop import op as op
 
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+import importlib.util as _iu
+import os as _os
+import sys as _sys
 
-import importlib.util as _iu, os as _os, sys as _sys, vllm
+import vllm
+from lmslim.layers.gemm.int8_utils import per_token_quant_int8
 
 _mab_path = _os.path.join(
     _os.path.dirname(vllm.__file__),
@@ -172,9 +176,9 @@ def moe_reduce_dispatch(
 
     # 根据 n 大小选择不同的 reduce 实现
     # TODO: remove this assertion when callers pass different values
-    assert routed_scaling_factor == 1.0, (
-        "routed_scaling_factor != 1.0 not yet supported in reduce path"
-    )
+    assert (
+        routed_scaling_factor == 1.0
+    ), "routed_scaling_factor != 1.0 not yet supported in reduce path"
     if 1 <= n <= 4:
         moe_sum_reduce_torch_compile(
             inter_cache_view,
@@ -234,7 +238,9 @@ def fused_experts_impl_int8_marlin(
     **_,
 ):
     # Check constraints.
-    assert use_int8_w8a8 is True and per_channel_quant is True, "Unsupport quant method"
+    assert (
+        use_int8_w8a8 is True and per_channel_quant is True
+    ), "Unsupported quant method"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
@@ -327,7 +333,7 @@ def fused_experts_impl_int8_marlin(
             print(f"Warning: get_moe_cuda_config failed: {e}")
             status = False
 
-        assert status, f"moe marlin unsupport this size E:{E}, N:{N}, K:{K}"
+        assert status, f"moe marlin unsupported this size E:{E}, N:{N}, K:{K}"
         if envs.USE_FUSED_RMS_QUANT and i_q is not None and i_s is not None:
             qcurr_hidden_states = i_q
             qa1_scale = i_s
@@ -406,9 +412,9 @@ def fused_experts_impl_int8_marlin(
             )
         else:
             # TODO: remove this assertion when callers pass different values
-            assert routed_scaling_factor == 1.0, (
-                "routed_scaling_factor != 1.0 not yet supported"
-            )
+            assert (
+                routed_scaling_factor == 1.0
+            ), "routed_scaling_factor != 1.0 not yet supported"
             moe_reduce_dispatch(
                 intermediate_cache3,
                 out_hidden_states,
@@ -527,7 +533,7 @@ def fused_experts_impl_int8_marlin_minimax_m2(
             print(f"Warning: get_moe_cuda_config failed: {e}")
             status = False
 
-        assert status, f"moe marlin unsupport this size E:{E}, N:{N}, K:{K}"
+        assert status, f"moe marlin unsupported this size E:{E}, N:{N}, K:{K}"
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             curr_topk_ids, config1["BLOCK_SIZE_M"], global_num_experts, expert_map

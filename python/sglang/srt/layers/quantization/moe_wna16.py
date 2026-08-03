@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/moe_wna16.py
@@ -7,7 +10,6 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
-from sglang.srt.utils import is_hcu
 import torch
 
 from sglang.srt.distributed.parallel_state import get_tp_group
@@ -25,7 +27,8 @@ from sglang.srt.layers.quantization.unquant import (
     UnquantizedLinearMethod,
 )
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import get_device_capability, set_weight_attrs
+from sglang.srt.utils import get_device_capability, is_hcu, set_weight_attrs
+
 _is_hcu = is_hcu()
 
 logger = logging.getLogger(__name__)

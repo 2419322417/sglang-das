@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.6.4.post1/vllm/distributed/device_communicators/custom_all_reduce.py
@@ -30,6 +33,7 @@ from sglang.srt.utils import (
     is_musa,
     log_info_on_rank0,
 )
+
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
 _is_hip = is_hip()
@@ -341,6 +345,7 @@ class CustomAllreduce:
     def __del__(self):
         self.close()
 
+
 def dispatch_custom_allreduce(
     group: ProcessGroup,
     device: torch.device,
@@ -419,7 +424,7 @@ def dispatch_custom_allreduce(
             )
         else:
             logger.info(
-                "[AR] Using AiterCustomAllreduce (ROCm/HIP, transport=%s, "
+                "[AR] Using AiterCustomAllreduce (AMD, transport=%s, "
                 "enable_register_for_capturing=%s)",
                 transport,
                 enable_reg,

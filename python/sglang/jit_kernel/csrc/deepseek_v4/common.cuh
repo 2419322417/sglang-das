@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include <sgl_kernel/tensor.h>
 #include <sgl_kernel/utils.h>
 
@@ -162,16 +166,16 @@ inline PlanResult plan_prefill(
   auto M = SymbolicSize{"num_tokens"};
   auto device = SymbolicDevice{};
   const bool is_gpu = [&] {
-      if (extend_lens.device().device_type == kDLCUDA) {
-          device.set_options<kDLCUDA>();
-          return true;
-      } else if (extend_lens.device().device_type == kDLROCM) {
-          device.set_options<kDLROCM>();
-          return true;
-      } else {
-          device.set_options<kDLCPU, kDLCUDAHost>();
-          return false;
-      }
+    if (extend_lens.device().device_type == kDLCUDA) {
+      device.set_options<kDLCUDA>();
+      return true;
+    } else if (extend_lens.device().device_type == kDLROCM) {
+      device.set_options<kDLROCM>();
+      return true;
+    } else {
+      device.set_options<kDLCPU, kDLCUDAHost>();
+      return false;
+    }
   }();
   TensorMatcher({N})  // extend_lens and seq_lens
       .with_dtype<int64_t>()

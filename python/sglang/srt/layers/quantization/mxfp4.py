@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-License-Identifier: Apache-2.0
@@ -54,8 +57,8 @@ from sglang.srt.utils import (
     is_cpu,
     is_flashinfer_available,
     is_gfx95_supported,
-    is_hip,
     is_hcu,
+    is_hip,
     is_sm90_supported,
     is_sm100_supported,
     is_sm120_supported,

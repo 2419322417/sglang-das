@@ -1,5 +1,9 @@
 # Adapted from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/common/chunk_delta_h.py
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
@@ -26,8 +30,10 @@ GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
 GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
 
 from sglang.srt.utils import get_bool_env_var, is_hcu
+
 _is_hcu = is_hcu()
 _use_prefill_aiter_linear_attn = get_bool_env_var("SGLANG_USE_AITER_LINEAR_ATTN")
+
 
 @triton.autotune(
     # Single hardcoded config. The kernel writes ht (final state) back into
@@ -330,7 +336,7 @@ def chunk_gated_delta_rule_fwd_h(
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
-    
+
     if not _use_prefill_aiter_linear_attn:
         chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
             k=k,
@@ -359,7 +365,10 @@ def chunk_gated_delta_rule_fwd_h(
             NT_BUCKET=(0 if NT <= 32 else (1 if NT <= 128 else 2)),
         )
     else:
-        from aiter.ops.triton.fla.sglang.chunk_delta_h import launch_chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+        from aiter.ops.triton.fla.sglang.chunk_delta_h import (
+            launch_chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
+        )
+
         launch_chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             k=k,
             u=u,

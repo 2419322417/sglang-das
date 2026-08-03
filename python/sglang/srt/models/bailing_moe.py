@@ -1,4 +1,7 @@
 # coding=utf-8
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023 Antgroup and The HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -22,14 +25,13 @@
 import logging
 from typing import Iterable, List, Optional, Tuple, Union
 
-from sglang.srt.batch_overlap.single_batch_overlap import SboFlags, compute_overlap_args
-from sglang.srt.batch_overlap.two_batch_overlap import MaybeTboDeepEPDispatcher
-from sglang.srt.layers.moe.token_dispatcher.base import BaseDispatcher, CombineInput, DispatchOutput
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.srt.batch_overlap.single_batch_overlap import SboFlags, compute_overlap_args
+from sglang.srt.batch_overlap.two_batch_overlap import MaybeTboDeepEPDispatcher
 from sglang.srt.distributed import (
     get_pp_group,
     parallel_state,
@@ -62,8 +64,16 @@ from sglang.srt.layers.moe import (
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.token_dispatcher import DeepEPDispatcher
+from sglang.srt.layers.moe.token_dispatcher.base import (
+    BaseDispatcher,
+    CombineInput,
+    DispatchOutput,
+)
 from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.moe.utils import filter_moe_weight_param_global_expert, is_sbo_enabled
+from sglang.srt.layers.moe.utils import (
+    filter_moe_weight_param_global_expert,
+    is_sbo_enabled,
+)
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
@@ -101,10 +111,14 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
 
-_use_fused_bailing_silu_mul_fp8_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_SILU_MUL_FP8_QUANT")
+_use_fused_bailing_silu_mul_fp8_quant = get_bool_env_var(
+    "SGLANG_USE_FUSED_BAILING_SILU_MUL_FP8_QUANT"
+)
 _use_fused_bailing_rms_rotary = get_bool_env_var("SGLANG_USE_FUSED_RMS_ROTARY")
 _use_fused_bailing_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_RMS_QUANT")
-_use_fused_bailing_moe_sum_add = get_bool_env_var("SGLANG_USE_FUSED_BAILING_MOE_SUM_ADD", "true")
+_use_fused_bailing_moe_sum_add = get_bool_env_var(
+    "SGLANG_USE_FUSED_BAILING_MOE_SUM_ADD", "true"
+)
 
 if _is_hcu:
     from lightop import rms_rotary_embedding_fuse_with_kv_store
@@ -238,7 +252,8 @@ class BailingMoESparseMoeBlock(nn.Module):
         self.score_function = getattr(config, "score_function", None)
         self.num_fused_shared_experts = (
             0
-            if get_server_args().disable_shared_experts_fusion or get_moe_a2a_backend().is_deepep()
+            if get_server_args().disable_shared_experts_fusion
+            or get_moe_a2a_backend().is_deepep()
             else config.num_shared_experts
         )
 
@@ -628,7 +643,7 @@ class BailingMoESparseMoeBlock(nn.Module):
 
                 post_dispatch_hook_handle.remove()
 
-            # NOTE: sbo not compatable with rms_quant
+            # NOTE: sbo not compatible with rms_quant
             def _pre_combine_hook(
                 dispatcher: BaseDispatcher, combine_input: CombineInput
             ):
@@ -827,11 +842,10 @@ class BailingMoEAttention(nn.Module):
         if self.use_qk_norm and _is_hcu and _use_fused_bailing_rms_rotary:
             # Fused RMSNorm + RoPE + kv_store path through custom op.
             cos_sin_cache = self.rotary_emb.cos_sin_cache
-            if (cos_sin_cache.device != q.device
-                    or cos_sin_cache.dtype != q.dtype):
-                cos_sin_cache = cos_sin_cache.to(q.device,
-                                                 dtype=q.dtype,
-                                                 non_blocking=True)
+            if cos_sin_cache.device != q.device or cos_sin_cache.dtype != q.dtype:
+                cos_sin_cache = cos_sin_cache.to(
+                    q.device, dtype=q.dtype, non_blocking=True
+                )
                 # Persist the converted cache so we don't re-copy/re-allocate
                 # on every forward when the original buffer starts on CPU.
                 self.rotary_emb.cos_sin_cache = cos_sin_cache
@@ -1036,7 +1050,9 @@ class BailingMoEBlock(nn.Module):
             sparse_norm_hidden_states = getattr(
                 forward_batch, "bailing_sparse_norm_hidden_states", None
             )
-            if sparse_norm_hidden_states is None or not isinstance(hidden_states, tuple):
+            if sparse_norm_hidden_states is None or not isinstance(
+                hidden_states, tuple
+            ):
                 raise RuntimeError(
                     "sparse rms+quant fusion expects normalized hidden_states and quant outputs"
                 )
@@ -1221,7 +1237,8 @@ class BailingMoEForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.num_fused_shared_experts = (
             0
-            if get_server_args().disable_shared_experts_fusion or get_moe_a2a_backend().is_deepep()
+            if get_server_args().disable_shared_experts_fusion
+            or get_moe_a2a_backend().is_deepep()
             else config.num_shared_experts
         )
 
@@ -1330,7 +1347,7 @@ class BailingMoEForCausalLM(nn.Module):
                 import torch.nn.functional as F
 
                 loaded_weight = F.normalize(loaded_weight, dim=0, p=2, eps=1e-7)
-            
+
             if self.num_fused_shared_experts > 0 and "mlp.shared_experts" in name:
                 name = name.replace(
                     "mlp.shared_experts",

@@ -1,6 +1,8 @@
 name: Nightly Test (HCU)
 
 on:
+  schedule:
+    - cron: "30 18 * * *" # 02:30 Beijing Time daily
   workflow_dispatch:
     inputs:
       ref:
@@ -182,7 +184,7 @@ jobs:
       wheel_urls: ${{ steps.probe.outputs.wheel_urls }}
     env:
       CHECKOUT_REF: ${{ needs.validate-config.outputs.target_ref }}
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
     steps:
       - name: Checkout code
@@ -222,7 +224,7 @@ jobs:
           import pathlib
           import sys
 
-          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/home/github/sgl_whl_temp"))
+          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/ci_public/sglang-das/hcu-wheel-staging"))
           container_root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_CONTAINER_ROOT", "/hcu-wheel-staging"))
           target_sha = os.environ["HCU_WHEEL_TARGET_SHA"]
           repo = os.environ["GITHUB_REPOSITORY"]
@@ -298,7 +300,7 @@ jobs:
         --cap-add=SYS_PTRACE
         --security-opt seccomp=unconfined
         --privileged=true
-        -v /home/github/sgl_whl_temp:/home/github/sgl_whl_temp
+        -v /ci_public/sglang-das/hcu-wheel-staging:/ci_public/sglang-das/hcu-wheel-staging
     env:
       TORCH_VERSION: '2.10.0'
       PIP_INDEX_URL: http://10.16.1.201:9929/nightly/dtk2604/+simple/
@@ -307,7 +309,7 @@ jobs:
       HCU_RUNNER_HOST_UID: ${{ vars.HCU_RUNNER_HOST_UID || '1000' }}
       HCU_RUNNER_HOST_GID: ${{ vars.HCU_RUNNER_HOST_GID || '1000' }}
       WHEEL_COMMIT_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
     steps:
       - name: Normalize workspace ownership before checkout
         run: |
@@ -393,7 +395,7 @@ jobs:
           ls -lh output/
 
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          STAGING_ROOT="${HCU_WHEEL_STAGING_ROOT:-/home/github/sgl_whl_temp}"
+          STAGING_ROOT="${HCU_WHEEL_STAGING_ROOT:-/ci_public/sglang-das/hcu-wheel-staging}"
           STAGING_DIR="${STAGING_ROOT}/${GITHUB_REPOSITORY_OWNER}_${REPO_NAME}/pr-nightly-${GITHUB_RUN_ID}/${WHEEL_COMMIT_SHA}"
           WHEEL_DIR="${STAGING_DIR}/wheels"
 
@@ -442,7 +444,7 @@ jobs:
     outputs:
       wheel_urls: ${{ steps.wait.outputs.wheel_urls }}
     env:
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       HCU_WHEEL_TARGET_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
       HCU_WHEEL_TARGET_SHORT_SHA: ${{ needs.probe-hcu-wheels.outputs.short_sha }}
@@ -467,7 +469,7 @@ jobs:
           import sys
           import time
 
-          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/home/github/sgl_whl_temp"))
+          root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_ROOT", "/ci_public/sglang-das/hcu-wheel-staging"))
           container_root = pathlib.Path(os.environ.get("HCU_WHEEL_STAGING_CONTAINER_ROOT", "/hcu-wheel-staging"))
           target_sha = os.environ["HCU_WHEEL_TARGET_SHA"]
           short_sha = os.environ.get("HCU_WHEEL_TARGET_SHORT_SHA", target_sha[:12])
@@ -866,8 +868,9 @@ jobs:
       SGLANG_HCU_HUMANEVAL_DATA_PATH: /public/opendas/DL_DATA/opencompass_data/humaneval/human-eval-v2-20210705.jsonl
       HCU_CI_INSTALL_WHEEL_URLS: ${{ needs.wait-hcu-wheels.outputs.wheel_urls || '' }}
       HCU_CI_USE_INSTALLED_WHEELS: "1"
-      HCU_WHEEL_STAGING_ROOT: /home/github/sgl_whl_temp
+      HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
+      HCU_ACCURACY_SHARED_ROOT: /ci_public/sglang-das/hcu-accuracy
     steps:
       - name: Check job filter
         id: filter
@@ -927,6 +930,7 @@ jobs:
           bash "${HCU_CI_CHECKOUT_DIR}/scripts/ci/hcu/hcu_ci_install_reasoning_code_deps.sh"
 
       - name: Run nightly HCU suite
+        id: run_suite
         if: steps.filter.outputs.should_run == 'true'
         env:
           INCLUDE_FILES: ${{ matrix.include_files }}
@@ -987,6 +991,33 @@ jobs:
         if: always() && steps.filter.outputs.should_run == 'true'
         run: bash "${HCU_CI_CHECKOUT_DIR}/scripts/ci/hcu/hcu_ci_cleanup_container.sh"
 
+      - name: Publish HCU accuracy results to shared storage
+        if: >-
+          always() &&
+          steps.filter.outputs.should_run == 'true' &&
+          matrix.group == 'nightly-hcu-accuracy-text'
+        env:
+          PARTITION_OUTCOME: ${{ steps.run_suite.outcome }}
+          HCU_ACCURACY_COMMIT_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
+          HCU_ACCURACY_TARGET_REF: ${{ needs.validate-config.outputs.target_ref }}
+        run: |
+          set -euo pipefail
+          result_dir="${RUNNER_TEMP}/hcu-sglang-${GITHUB_RUN_ID}-nightly-${{ matrix.name }}/test-results/hcu-accuracy"
+          python_bin="$(command -v python3.12 || command -v python3.10 || command -v python3.9 || command -v python3.8 || command -v python3)"
+          "${python_bin}" "${HCU_CI_CHECKOUT_DIR}/scripts/ci/hcu/hcu_ci_publish_accuracy.py" \
+            --local-results-dir "${result_dir}" \
+            --shared-root "${HCU_ACCURACY_SHARED_ROOT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --partition "${{ matrix.name }}" \
+            --outcome "${PARTITION_OUTCOME}" \
+            --target-ref "${HCU_ACCURACY_TARGET_REF}" \
+            --commit-sha "${HCU_ACCURACY_COMMIT_SHA}" \
+            --image-ref "${HCU_CI_IMAGE}" \
+            --image-id "${HCU_CI_RUNTIME_IMAGE_ID:-unknown}" \
+            --runner-name "${RUNNER_NAME}" \
+            --retention-days 14
+
   nightly-hcu-finish:
     name: Nightly HCU finish
     needs:
@@ -1019,3 +1050,66 @@ jobs:
           done
 
           echo "All HCU nightly jobs completed successfully or were intentionally skipped."
+
+  notify-hcu-accuracy-feishu:
+    name: Notify HCU accuracy to Feishu
+    needs:
+      - validate-config
+      - probe-hcu-wheels
+      - nightly-hcu
+      - nightly-hcu-finish
+    if: >-
+      always() &&
+      github.ref_name == github.event.repository.default_branch &&
+      needs.validate-config.result == 'success' &&
+      (needs.validate-config.outputs.job_filter == 'all' ||
+       needs.validate-config.outputs.job_filter == 'nightly-hcu-accuracy-text')
+    runs-on: ${{ needs.validate-config.outputs.runner_label || vars.HCU_CI_RUNNER_LABEL }}
+    environment: hcu-ci-notify
+    steps:
+      - name: Checkout notification source
+        env:
+          CHECKOUT_REF: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          checkout_dir="${RUNNER_TEMP}/hcu-notify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "${checkout_dir}"
+          mkdir -p "${checkout_dir}"
+          echo "HCU_NOTIFY_SOURCE_DIR=${checkout_dir}" >> "${GITHUB_ENV}"
+          git init "${checkout_dir}"
+          cd "${checkout_dir}"
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          git \
+            -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" \
+            -c http.https://github.com.proxy= \
+            -c http.proxy= \
+            -c https.proxy= \
+            fetch --no-tags --depth=1 origin "${CHECKOUT_REF}"
+          git checkout --force FETCH_HEAD
+
+      - name: Send signed Feishu accuracy card
+        env:
+          FEISHU_HCU_CI_WEBHOOK: ${{ secrets.FEISHU_HCU_CI_WEBHOOK }}
+          FEISHU_HCU_CI_SIGNING_SECRET: ${{ secrets.FEISHU_HCU_CI_SIGNING_SECRET }}
+          HCU_ACCURACY_RESULTS_DIR: /ci_public/sglang-das/hcu-accuracy/run-${{ github.run_id }}/attempt-${{ github.run_attempt }}
+          HCU_ACCURACY_BRANCH: ${{ github.ref_name }}
+          HCU_ACCURACY_TARGET_REF: ${{ needs.validate-config.outputs.target_ref }}
+          HCU_ACCURACY_COMMIT_SHA: ${{ needs.probe-hcu-wheels.outputs.full_sha }}
+          HCU_ACCURACY_IMAGE: ${{ needs.validate-config.outputs.image }}
+          HCU_ACCURACY_WORKFLOW_RESULT: ${{ needs.nightly-hcu.result }}
+          HCU_ACCURACY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3.12 || command -v python3.10 || command -v python3.9 || command -v python3.8 || command -v python3)"
+          "${python_bin}" "${HCU_NOTIFY_SOURCE_DIR}/scripts/ci/hcu/hcu_ci_notify_feishu.py" \
+            --results-dir "${HCU_ACCURACY_RESULTS_DIR}" \
+            --branch "${HCU_ACCURACY_BRANCH}" \
+            --target-ref "${HCU_ACCURACY_TARGET_REF}" \
+            --commit-sha "${HCU_ACCURACY_COMMIT_SHA}" \
+            --image "${HCU_ACCURACY_IMAGE}" \
+            --workflow-result "${HCU_ACCURACY_WORKFLOW_RESULT}" \
+            --run-url "${HCU_ACCURACY_RUN_URL}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"

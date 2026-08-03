@@ -16,45 +16,39 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union
-from sglang.srt.distributed import (
-    get_moe_expert_parallel_rank,
-    get_moe_expert_parallel_world_size,
-)
-from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_marlin import (
-    SlimQuantCompressedTensorsMarlinConfig,
-)
-from sglang.srt.layers.quantization.slimquant_w4a8_marlin import (
-    SlimQuantW4A8Int8MarlinConfig,
-)
+
 import torch
 import torch.nn.functional as F
 
-from sglang.jit_kernel.activation import silu_and_mul
-from sglang.kernels.ops.quantization.fp8_kernel import (
-    is_fp8_fnuz,
-    sglang_per_token_group_quant_fp8,
-)
-from sglang.srt.environ import envs
-from sglang.srt.hardware_backend.npu.utils import FusedMoEMode, npu_format_cast
-from sglang.srt.layers import deep_gemm_wrapper
-from sglang.srt.layers.moe import (
-    get_deepep_mode,
-    get_moe_a2a_backend,
-    get_moe_runner_backend,
-    # should_use_flashinfer_trtllm_moe, # 找不到
-)
 from sglang.kernels.ops.moe.ep_moe_kernels import (
+    build_m_indices_triton,
     ep_gather,
     ep_scatter,
     ep_scatter_no_scale,
     tma_align_input_scale,
-    build_m_indices_triton,
+)
+from sglang.kernels.ops.moe.rocm_moe_utils import upscale, upscale_mxfp4
+from sglang.kernels.ops.quantization.fp8_kernel import (
+    is_fp8_fnuz,
+    sglang_per_token_group_quant_fp8,
+)
+from sglang.srt.batch_overlap.single_batch_overlap import DownGemmOverlapArgs
+from sglang.srt.distributed import (
+    get_moe_expert_parallel_rank,
+    get_moe_expert_parallel_world_size,
+)
+from sglang.srt.environ import envs
+from sglang.srt.hardware_backend.npu.utils import FusedMoEMode, npu_format_cast
+from sglang.srt.layers import deep_gemm_wrapper
+from sglang.srt.layers.moe import (  # should_use_flashinfer_trtllm_moe, # 找不到
+    get_deepep_mode,
+    get_moe_a2a_backend,
+    get_moe_runner_backend,
 )
 from sglang.srt.layers.moe.fused_moe_triton.layer import (
     FusedMoE,
     moe_forward_piecewise_cuda_graph_impl,
 )
-from sglang.kernels.ops.moe.rocm_moe_utils import upscale, upscale_mxfp4
 from sglang.srt.layers.moe.moe_runner.deep_gemm import copy_list_to_gpu_no_ce
 from sglang.srt.layers.moe.token_dispatcher.deepep import (
     DeepEPLLCombineInput,
@@ -65,17 +59,23 @@ from sglang.srt.layers.moe.token_dispatcher.moriep import (
     MoriEPNormalCombineInput,
 )
 from sglang.srt.layers.moe.topk import TopKOutput, TopKOutputChecker
+from sglang.srt.layers.moe.utils import _get_deepgemm_shuffle_unique
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
     CompressedTensorsFusedMoEMethod,
+)
+from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_marlin import (
+    SlimQuantCompressedTensorsMarlinConfig,
 )
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     NPUCompressedTensorsW4A16Int4DynamicMoE,
 )
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from sglang.srt.layers.quantization.quark.schemes import QuarkW4A4MXFp4MoE
+from sglang.srt.layers.quantization.slimquant_w4a8_marlin import (
+    SlimQuantW4A8Int8MarlinConfig,
+)
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
-from sglang.srt.batch_overlap.single_batch_overlap import DownGemmOverlapArgs
 from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
     is_in_tc_piecewise_cuda_graph,
 )
@@ -99,33 +99,27 @@ if TYPE_CHECKING:
     )
 
 from deepgemm import (
-    m_grouped_w4a8_gemm_nt_masked,
-    m_grouped_w8a8_gemm_nt_masked,
-    m_grouped_i8_gemm_nt_contiguous as _deepgemm_i8_gemm_nt_contiguous,
+    m_grouped_bf16_gemm_nt_contiguous,
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_contiguous,
-    m_grouped_bf16_gemm_nt_contiguous,
+    m_grouped_i8_gemm_nt_contiguous,
+    m_grouped_i8_gemm_nt_masked,
+    m_grouped_w4a8_gemm_nt_masked,
 )
-from lightop import (
-    fuse_silu_mul_quant,
-    fuse_silu_mul_quant_ep,
-    fuse_silu_mul_fp8_quant_ep,
+from deepgemm.m_group_gemm import grouped_gemm_w4a16_nt_masked_entry
+from lightop import moe as lightop_op
+from lightop.activation import (
     fuse_silu_and_mul,
     fuse_silu_mul_fp8_quant,
+    fuse_silu_mul_fp8_quant_ep,
+    fuse_silu_mul_quant,
+    fuse_silu_mul_quant_ep,
 )
-from lightop import op as lightop_op
-from deepgemm.m_group_gemm import grouped_gemm_w4a16_nt_masked_entry
 
 _is_hip = is_hip()
 _is_npu = is_npu()
 _is_hcu = is_hcu()
 _is_fp8_fnuz = is_fp8_fnuz()
-if _is_hcu:
-    from lightop import (
-        m_grouped_w8a8_gemm_nt_contig_asm as m_grouped_i8_gemm_nt_contiguous,
-    )
-else:
-    m_grouped_i8_gemm_nt_contiguous = _deepgemm_i8_gemm_nt_contiguous
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _use_fp8_w8a8_moe = get_bool_env_var("SGLANG_USE_FP8_W8A8_MOE")
 _use_marlin_w16a16_moe = get_bool_env_var("SGLANG_USE_MARLIN_W16A16_MOE")
@@ -369,7 +363,7 @@ def m_grouped_w4a8_gemm_nt_masked_fake(
     return d
 
 
-def m_grouped_w8a8_gemm_nt_masked_wrapper(
+def m_grouped_i8_gemm_nt_masked_wrapper(
     a0: torch.Tensor,
     a1: torch.Tensor,
     b0: torch.Tensor,
@@ -378,19 +372,18 @@ def m_grouped_w8a8_gemm_nt_masked_wrapper(
     masked_m: torch.Tensor,
     expected_m_per_group: int,
 ) -> torch.Tensor:
-    return m_grouped_w8a8_gemm_nt_masked(
+    shuffle_unique, _mode = _get_deepgemm_shuffle_unique()
+    return m_grouped_i8_gemm_nt_masked(
         (a0, a1),
         (b0, b1),
         d,
         masked_m,
         expected_m_per_group,
-        config={
-            "MODE": 1000,
-        },
+        shuffle_unique=shuffle_unique,
     )
 
 
-def m_grouped_w8a8_gemm_nt_masked_fake(
+def m_grouped_i8_gemm_nt_masked_fake(
     a0: torch.Tensor,
     a1: torch.Tensor,
     b0: torch.Tensor,
@@ -435,11 +428,12 @@ direct_register_custom_op(
     fake_impl=m_grouped_w4a8_gemm_nt_masked_fake,
 )
 direct_register_custom_op(
-    op_name="m_grouped_w8a8_gemm_nt_masked",
-    op_func=m_grouped_w8a8_gemm_nt_masked_wrapper,
+    op_name="m_grouped_i8_gemm_nt_masked",
+    op_func=m_grouped_i8_gemm_nt_masked_wrapper,
     mutates_args=[],
-    fake_impl=m_grouped_w8a8_gemm_nt_masked_fake,
+    fake_impl=m_grouped_i8_gemm_nt_masked_fake,
 )
+
 direct_register_custom_op(
     op_name="fuse_silu_mul_quant_ep",
     op_func=fuse_silu_mul_quant_ep_wrapper,
@@ -539,9 +533,9 @@ class DeepEPMoE(FusedMoE):
             and not _is_npu
             and not _is_hip
         ):
-            assert deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM, (
-                "Unquantized DeepEP low-latency MoE requires DeepGEMM BF16"
-            )
+            assert (
+                deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            ), "Unquantized DeepEP low-latency MoE requires DeepGEMM BF16"
             self.deprecate_flag = True
         else:
             self.deprecate_flag = False
@@ -664,9 +658,9 @@ class DeepEPMoE(FusedMoE):
         i_s: Optional[torch.Tensor] = None,
     ):
         if is_in_tc_piecewise_cuda_graph():
-            assert TopKOutputChecker.format_is_standard(topk_output), (
-                "Only standard topk output is supported for piecewise cuda graph"
-            )
+            assert TopKOutputChecker.format_is_standard(
+                topk_output
+            ), "Only standard topk output is supported for piecewise cuda graph"
             return moe_forward_piecewise_cuda_graph_impl(
                 hidden_states,
                 topk_output.topk_weights,
@@ -1100,7 +1094,18 @@ class DeepEPMoE(FusedMoE):
         )
         del input_tensor
 
-        q_a2_all, q_a2_scale = fuse_silu_mul_fp8_quant(gateup_output, fp8type=0)
+        swiglu_limit = self.moe_runner_config.swiglu_limit
+        if swiglu_limit is None:
+            q_a2_all, q_a2_scale = fuse_silu_mul_fp8_quant(
+                gateup_output,
+                fp8type=0,
+            )
+        else:
+            q_a2_all, q_a2_scale = fuse_silu_mul_fp8_quant(
+                gateup_output,
+                fp8type=0,
+                limit=swiglu_limit,
+            )
         del gateup_output
 
         down_output = torch.empty(
@@ -1327,12 +1332,13 @@ class DeepEPMoE(FusedMoE):
             device=hidden_states_device,
             dtype=torch.bfloat16,
         )
-
+        shuffle_unique, _mode = _get_deepgemm_shuffle_unique()
         m_grouped_i8_gemm_nt_contiguous(
             (a_int8, a_scale),
             w13_weight_int8,
             gateup_output,
             m_indices,
+            shuffle_unique=shuffle_unique,
         )
 
         q_a2_all, q_a2_scale = fuse_silu_mul_quant(gateup_output)
@@ -1349,6 +1355,7 @@ class DeepEPMoE(FusedMoE):
             w2_weight_int8,
             down_output,
             m_indices,
+            shuffle_unique=shuffle_unique,
         )
 
         gather_out = torch.zeros(
@@ -1480,7 +1487,7 @@ class DeepEPMoE(FusedMoE):
             device=gateup_output.device,
             dtype=torch.bfloat16,
         )
-        silu_and_mul(gateup_output.view(-1, N), down_input)
+        fuse_silu_and_mul(input=gateup_output.view(-1, N), output=down_input)
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),
@@ -1634,7 +1641,7 @@ class DeepEPMoE(FusedMoE):
         )
 
         # ---- first GEMM ----
-        torch.ops.sglang.m_grouped_w8a8_gemm_nt_masked(
+        torch.ops.sglang.m_grouped_i8_gemm_nt_masked(
             hidden_states,
             hidden_states_scale,
             w13_weight,
@@ -1657,7 +1664,7 @@ class DeepEPMoE(FusedMoE):
             (num_groups, m, n2), device=q_a2_all.device, dtype=torch.bfloat16
         )
 
-        torch.ops.sglang.m_grouped_w8a8_gemm_nt_masked(
+        torch.ops.sglang.m_grouped_i8_gemm_nt_masked(
             q_a2_all,
             q_a2_scale,
             w2_weight,

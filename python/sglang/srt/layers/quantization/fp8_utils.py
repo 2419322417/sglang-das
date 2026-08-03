@@ -33,6 +33,12 @@ from sglang.srt.utils.common import torch_release
 if TYPE_CHECKING:
     from sglang.srt.server_args import ServerArgs
 
+from lmslim import quant_ops
+from lmslim.layers.gemm.fp8_utils import (
+    per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu,
+)
+from lmslim.quantize.quant_ops import BlockSize
+
 from sglang.kernels.ops.quantization.fp8_kernel import (
     fp8_dtype,
     fp8_max,
@@ -58,9 +64,9 @@ from sglang.srt.utils import (
     get_hip_version,
     is_blackwell_supported,
     is_cuda,
-    is_hcu,
     is_flashinfer_available,
     is_gfx95_supported,
+    is_hcu,
     is_hip,
     is_musa,
     is_sm90_supported,
@@ -70,9 +76,6 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.custom_op import register_custom_op
 
-from lmslim import quant_ops
-from lmslim.quantize.quant_ops import BlockSize
-from lmslim.layers.gemm.fp8_utils import per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu
 logger = logging.getLogger(__name__)
 
 _is_hip = is_hip()
@@ -160,6 +163,7 @@ def use_aiter_triton_gemm_w8a8_tuned_gfx950(n: int, k: int) -> bool:
         (8192, 32768),
     ]
 
+
 _sglang_enable_torch_compile = get_bool_env_var("SGLANG_ENABLE_TORCH_COMPILE")
 
 if _use_aiter:
@@ -196,6 +200,7 @@ if _is_cuda:
         M = mat_a.shape[-2]
         N = mat_b.shape[-1]
         return mat_a.new_empty((M, N), dtype=out_dtype)
+
 
 if _is_hcu:
     import deepgemm
@@ -996,35 +1001,37 @@ def aiter_w8a8_block_fp8_linear(
         dtype=torch.bfloat16 if input_scale is not None else input_2d.dtype
     ).view(*output_shape)
 
-def hipblaslt_w8a8_block_fp8_linear(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        block_size: List[int],
-        weight_scale: torch.Tensor,
-        input_scale: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-        input_2d = input.view(-1, input.shape[-1])
-        output_shape = [*input.shape[:-1], weight.shape[1]]
-        q_input, input_scale = per_token_group_quant_fp8_hcu(
-            input_2d, block_size[1], column_major_scales=False
-        )
-        enum_block_size = BlockSize.block_128x128
 
-        # if hasattr(self, "block_size") and self.block_size[0] == 64:
-        #     enum_block_size = BlockSize.block_64x64
-        
-        output = hipblaslt_w8a8_block_fp8_matmul(
-            A=q_input,
-            B=weight,
-            As=input_scale,
-            Bs=weight_scale,
-            block_size=enum_block_size,
-            output_dtype=input_2d.dtype,
-        )
-        if bias is not None:
-            output += bias
-        return output.to(dtype=input_2d.dtype).view(*output_shape)
+def hipblaslt_w8a8_block_fp8_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[1]]
+    q_input, input_scale = per_token_group_quant_fp8_hcu(
+        input_2d, block_size[1], column_major_scales=False
+    )
+    enum_block_size = BlockSize.block_128x128
+
+    # if hasattr(self, "block_size") and self.block_size[0] == 64:
+    #     enum_block_size = BlockSize.block_64x64
+
+    output = hipblaslt_w8a8_block_fp8_matmul(
+        A=q_input,
+        B=weight,
+        As=input_scale,
+        Bs=weight_scale,
+        block_size=enum_block_size,
+        output_dtype=input_2d.dtype,
+    )
+    if bias is not None:
+        output += bias
+    return output.to(dtype=input_2d.dtype).view(*output_shape)
+
 
 def hipblaslt_w8a8_block_fp8_matmul(
     A: torch.Tensor,
@@ -1037,13 +1044,18 @@ def hipblaslt_w8a8_block_fp8_matmul(
     assert A.shape[1] == B.shape[0]
     m, k = A.shape
     _, n = B.shape
-    _, d = quant_ops.hipblaslt_w8a8_blockwise_gemm(A, B, As, Bs, m, n, k, 'NN', output_dtype, block_size, None)
-    
+    _, d = quant_ops.hipblaslt_w8a8_blockwise_gemm(
+        A, B, As, Bs, m, n, k, "NN", output_dtype, block_size, None
+    )
+
     return d
 
+
 def torch_fp8_block_gemm(
-    a, b,
-    scale_a, scale_b,
+    a,
+    b,
+    scale_a,
+    scale_b,
     block_size,
     out_dtype=torch.bfloat16,
 ):
@@ -1056,17 +1068,18 @@ def torch_fp8_block_gemm(
     m, k = a.shape
     _, n = b.shape
 
-    k_block = torch.arange(k, device=a.device) // block_size   
-    n_block = torch.arange(n, device=a.device) // block_size   
+    k_block = torch.arange(k, device=a.device) // block_size
+    n_block = torch.arange(n, device=a.device) // block_size
 
     scale_a_full = scale_a_cp[:, k_block]
     scale_b_full = scale_b_cp[k_block][:, n_block]
 
-    a_scaled = a_cp * scale_a_full         
-    b_scaled = b_cp * scale_b_full         
+    a_scaled = a_cp * scale_a_full
+    b_scaled = b_cp * scale_b_full
 
     c = a_scaled @ b_scaled
     return c.to(out_dtype)
+
 
 def triton_w8a8_block_fp8_linear(
     input: torch.Tensor,
@@ -1399,6 +1412,7 @@ def dequant_mxfp4(
         quantized_data=w_block, scale=w_scale, dtype=out_dtype, block_sizes=[32]
     )
     return out_raw.reshape(batch, n, k * 32)
+
 
 def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype = fp8_dtype
@@ -1897,14 +1911,18 @@ def apply_fp8_linear(
 
         if _is_hcu:
             output = torch.empty(output_shape, device=input.device, dtype=input.dtype)
-            deepgemm.fp8_gemm((qinput,x_scale),(weight,weight_scale),output)
+            deepgemm.fp8_gemm((qinput, x_scale), (weight, weight_scale), output)
+            if bias is not None:
+                output += bias
 
             return output.view(*output_shape)
 
     if _is_hcu and isinstance(input, tuple):
         output_shape = [*input[0].shape[:-1], weight.shape[1]]
         output = torch.empty(output_shape, device=input[0].device, dtype=torch.bfloat16)
-        deepgemm.fp8_gemm((input[0],input[1]),(weight,weight_scale),output)
+        deepgemm.fp8_gemm((input[0], input[1]), (weight, weight_scale), output)
+        if bias is not None:
+            output += bias
 
         return output.view(*output_shape)
 

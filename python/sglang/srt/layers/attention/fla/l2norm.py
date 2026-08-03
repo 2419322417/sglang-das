@@ -1,5 +1,9 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/l2norm.py
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
@@ -95,10 +99,15 @@ def l2norm_fwd(
     if output_dtype is None:
         output_dtype = x.dtype
 
-    if _has_l2norm_cuda and x.is_cuda and x.dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
+    if (
+        _has_l2norm_cuda
+        and x.is_cuda
+        and x.dtype
+        in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        )
     ):
         y = _l2norm_cuda(x.contiguous(), eps)
         if y.dtype != output_dtype:

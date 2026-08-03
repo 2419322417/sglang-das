@@ -1,10 +1,13 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Adapted from https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/layers/quantization/compressed_tensors
 # SPDX-License-Identifier: Apache-2.0
 
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
-from typing import Callable, Optional
 import os
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering

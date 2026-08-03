@@ -1,0 +1,60 @@
+name: HCU Feishu Notification Preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hcu-feishu-notification-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    name: Send HCU accuracy card preview
+    runs-on: [self-hosted, Linux, X64]
+    environment: hcu-ci-notify
+    timeout-minutes: 10
+    steps:
+      - name: Checkout notification source
+        env:
+          CHECKOUT_REF: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          checkout_dir="${RUNNER_TEMP}/hcu-feishu-preview-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "${checkout_dir}"
+          mkdir -p "${checkout_dir}"
+          echo "HCU_NOTIFY_SOURCE_DIR=${checkout_dir}" >> "${GITHUB_ENV}"
+          git init "${checkout_dir}"
+          cd "${checkout_dir}"
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          git \
+            -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${auth}" \
+            -c http.https://github.com.proxy= \
+            -c http.proxy= \
+            -c https.proxy= \
+            fetch --no-tags --depth=1 origin "${CHECKOUT_REF}"
+          git checkout --force FETCH_HEAD
+
+      - name: Send signed Feishu preview card
+        env:
+          FEISHU_HCU_CI_WEBHOOK: ${{ secrets.FEISHU_HCU_CI_WEBHOOK }}
+          FEISHU_HCU_CI_SIGNING_SECRET: ${{ secrets.FEISHU_HCU_CI_SIGNING_SECRET }}
+          HCU_PREVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python3.12 || command -v python3.10 || command -v python3.9 || command -v python3.8 || command -v python3)"
+          "${python_bin}" "${HCU_NOTIFY_SOURCE_DIR}/scripts/ci/hcu/hcu_ci_notify_feishu.py" \
+            --results-dir "${RUNNER_TEMP}/hcu-feishu-preview-unused" \
+            --branch "${GITHUB_REF_NAME}" \
+            --target-ref "${GITHUB_SHA}" \
+            --commit-sha "${GITHUB_SHA}" \
+            --image "notification-preview/no-model" \
+            --workflow-result "success" \
+            --run-url "${HCU_PREVIEW_RUN_URL}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --preview

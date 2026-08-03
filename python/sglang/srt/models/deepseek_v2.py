@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright 2023-2024 SGLang Team
@@ -65,12 +68,14 @@ from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.amx_utils import PackWeightMethod
+from sglang.srt.layers.attention.dsa.dequant_k_cache import dequantize_k_cache_paged
 from sglang.srt.layers.attention.dsa.dsa_indexer import Indexer
 from sglang.srt.layers.attention.dsa.utils import (
     can_dsa_cp_split,
     dsa_use_prefill_cp,
     is_dsa_enable_prefill_cp,
 )
+from sglang.srt.layers.attention.utils import concat_and_cast_mha_k_triton
 from sglang.srt.layers.communicator import (
     LayerCommunicator,
     LayerScatterModes,
@@ -124,8 +129,6 @@ from sglang.srt.layers.quantization.fp8_utils import (
 from sglang.srt.layers.quantization.mxfp4_flashinfer_trtllm_moe import (
     maybe_fuse_routed_scale_and_shared_add,
 )
-from sglang.srt.layers.attention.dsa.dequant_k_cache import dequantize_k_cache_paged
-from sglang.srt.layers.attention.utils import concat_and_cast_mha_k_triton
 from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope_wrapper
@@ -215,6 +218,7 @@ from sglang.srt.utils.custom_op import register_custom_op
 
 if _use_aiter:
     from sglang.srt.layers.rocm_linear_utils import aiter_dsv3_router_gemm
+
 from sglang.srt.layers.attention.lightop_concat import concat_decode_opt
 from sglang.srt.layers.attention.tbo_backend import TboAttnBackend
 
@@ -332,11 +336,13 @@ if _is_cuda:
             )
         _bmm_fp8_op(A, B, out, A_scale, B_scale)
         return out
+
 elif _is_hip:
+    from sgl_kernel import merge_state_v2
+
     from sglang.kernels.ops.attention.rocm_mla_decode_rope import (
         decode_attention_fwd_grouped_rope,
     )
-    from sgl_kernel import merge_state_v2
 elif _is_npu:
     from sglang.srt.hardware_backend.npu.modules.deepseek_v2_attention_mla_npu import (
         forward_dsa_core_npu,
@@ -950,15 +956,13 @@ class DeepseekV2MoE(nn.Module):
                 self.shared_experts._enable_nvfp4_gemm_swiglu_fusion = True
                 self.shared_experts.down_proj._accepts_prequantized_fp4 = True
             self._shared_expert_tp1 = _shared_expert_use_tp1
-            is_packed_weight = (
-                hasattr(self.shared_experts.gate_up_proj.quant_method, "quant_config")
-                and self.shared_experts.gate_up_proj.quant_method.quant_config.get_name()
-                in {
-                    "awq",
-                    "awq_marlin",
-                    "moe_wna16",
-                }
-            )
+            is_packed_weight = hasattr(
+                self.shared_experts.gate_up_proj.quant_method, "quant_config"
+            ) and self.shared_experts.gate_up_proj.quant_method.quant_config.get_name() in {
+                "awq",
+                "awq_marlin",
+                "moe_wna16",
+            }
             self.shared_experts_is_int8 = (
                 not is_packed_weight
                 and self.shared_experts.gate_up_proj.weight.dtype == torch.int8
@@ -1589,7 +1593,7 @@ class DeepseekV2MoE(nn.Module):
 
                 post_dispatch_hook_handle.remove()
 
-            # NOTE: sbo not compatable with rms_quant
+            # NOTE: sbo not compatible with rms_quant
             def _pre_combine_hook(
                 dispatcher: BaseDispatcher, combine_input: CombineInput
             ):
@@ -2173,18 +2177,18 @@ class DeepseekV2AttentionMLA(
                 not get_attn_tp_context().input_scattered
                 and hidden_states[0].shape[0] == 0
             ):
-                assert not self.o_proj.reduce_results, (
-                    "short-circuiting allreduce will lead to hangs"
-                )
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
                 return hidden_states[0]
         else:
             if (
                 not get_attn_tp_context().input_scattered
                 and hidden_states.shape[0] == 0
             ):
-                assert not self.o_proj.reduce_results, (
-                    "short-circuiting allreduce will lead to hangs"
-                )
+                assert (
+                    not self.o_proj.reduce_results
+                ), "short-circuiting allreduce will lead to hangs"
                 return hidden_states, None, forward_batch, None
 
         attn_forward_method = self.dispatch_attn_forward_method(forward_batch)
@@ -3004,9 +3008,9 @@ class DeepseekV2AttentionMLA(
         forward_batch: ForwardBatch,
         zero_allocator: BumpAllocator,
     ):
-        assert self.q_lora_rank is not None and use_intel_amx_backend(self), (
-            "forward_absorb_fused_mla_rope_cpu_prepare requires q_lora_rank is not None and use_intel_amx_backend"
-        )
+        assert self.q_lora_rank is not None and use_intel_amx_backend(
+            self
+        ), "forward_absorb_fused_mla_rope_cpu_prepare requires q_lora_rank is not None and use_intel_amx_backend"
 
         q_input, k_input, v_input = (
             torch.ops.sgl_kernel.qkv_proj_with_rope_fused_weight(
@@ -3124,9 +3128,9 @@ class DeepseekV2AttentionMLA(
     def forward_absorb_fused_mla_rope_cpu_core(
         self, q_input, k_input, v_input, forward_batch, zero_allocator
     ):
-        assert self.q_lora_rank is not None and use_intel_amx_backend(self), (
-            "forward_absorb_fused_mla_rope_cpu_core requires q_lora_rank is not None and use_intel_amx_backend"
-        )
+        assert self.q_lora_rank is not None and use_intel_amx_backend(
+            self
+        ), "forward_absorb_fused_mla_rope_cpu_core requires q_lora_rank is not None and use_intel_amx_backend"
 
         attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
@@ -3347,9 +3351,9 @@ class DeepseekV2AttentionMLA(
         if isinstance(backend, TboAttnBackend):  # if enable tbo, get primary backend
             backend = backend.primary
         kv_indices = backend.forward_metadata.page_table_1_flattened
-        assert kv_indices is not None, (
-            "page_table_1_flattened should have been generated for FP8 MHA path"
-        )
+        assert (
+            kv_indices is not None
+        ), "page_table_1_flattened should have been generated for FP8 MHA path"
 
         kv_cache_fp8 = get_token_to_kv_pool().get_key_buffer(self.attn_mha.layer_id)
 

@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -112,7 +115,8 @@ _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _use_fused_bailing_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_BAILING_RMS_QUANT")
 
 if _use_fused_bailing_rms_quant:
-    from lightop import rms_norm_per_token_fp8_quant
+    from lightop.norm import rms_norm_per_token_fp8_quant
+
 
 def _fused_rmsnorm_fp8_per_token_quant(
     hidden_states: torch.Tensor,
@@ -637,7 +641,12 @@ class LayerCommunicator:
                             self.input_layernorm.weight.data,
                             self.input_layernorm.variance_epsilon,
                         )
-                    elif _use_fused_bailing_rms_quant and (enable_dp_attention is None or moe_a2a_backend is None) and get_server_args().ep_size == 1 and get_server_args().dp_size == 1:
+                    elif (
+                        _use_fused_bailing_rms_quant
+                        and (enable_dp_attention is None or moe_a2a_backend is None)
+                        and get_server_args().ep_size == 1
+                        and get_server_args().dp_size == 1
+                    ):
                         out_fp8, out_bs = rms_norm_per_token_fp8_quant(
                             hidden_states,
                             self.input_layernorm.weight,
@@ -702,7 +711,11 @@ class LayerCommunicator:
                             self.input_layernorm.variance_epsilon,
                             residual=residual,
                         )
-                    elif _use_fused_bailing_rms_quant and get_server_args().ep_size == 1 and get_server_args().dp_size == 1:
+                    elif (
+                        _use_fused_bailing_rms_quant
+                        and get_server_args().ep_size == 1
+                        and get_server_args().dp_size == 1
+                    ):
                         out_fp8, out_bs = rms_norm_per_token_fp8_quant(
                             hidden_states,
                             self.input_layernorm.weight,
@@ -1055,10 +1068,9 @@ class CommunicateWithAllReduceAndLayerNormFn:
     @staticmethod
     def _skip_layernorm(forward_batch: ForwardBatch) -> bool:
         return (
-            (_use_fused_rms_quant and forward_batch.rms_quant_flag)
-            or CommunicateWithAllReduceAndLayerNormFn._use_bailing_rms_quant(
-                forward_batch
-            )
+            _use_fused_rms_quant and forward_batch.rms_quant_flag
+        ) or CommunicateWithAllReduceAndLayerNormFn._use_bailing_rms_quant(
+            forward_batch
         )
 
     @staticmethod
@@ -1080,9 +1092,8 @@ class CommunicateWithAllReduceAndLayerNormFn:
             residual=residual,
             update_input=update_input,
         )
-        if (
-            forward_batch is not None
-            and getattr(forward_batch, "bailing_sparse_rms_quant_fusion", False)
+        if forward_batch is not None and getattr(
+            forward_batch, "bailing_sparse_rms_quant_fusion", False
         ):
             # Gate should consume the in-place updated normalized hidden states.
             forward_batch.bailing_sparse_norm_hidden_states = hidden_states
@@ -1100,7 +1111,9 @@ class CommunicateWithAllReduceAndLayerNormFn:
     ):
         # TODO move these `if shape != 0` into LayerNorm itself
         if hidden_states.shape[0] != 0:
-            if not CommunicateWithAllReduceAndLayerNormFn._skip_layernorm(forward_batch):
+            if not CommunicateWithAllReduceAndLayerNormFn._skip_layernorm(
+                forward_batch
+            ):
                 hidden_states, residual = layernorm(hidden_states, residual)
             elif CommunicateWithAllReduceAndLayerNormFn._use_bailing_rms_quant(
                 forward_batch
@@ -1180,7 +1193,7 @@ class CommunicateWithAllReduceAndLayerNormFn:
                             CommunicateWithAllReduceAndLayerNormFn._bailing_rms_quant(
                                 hidden_states, layernorm, None, forward_batch
                             )
-                        )            
+                        )
             elif context.attn_tp_rank == 0:
                 hidden_states += residual
 
@@ -1266,7 +1279,9 @@ class CommunicateWithAllReduceAndLayerNormFn:
         if residual_input_mode == ScatterMode.TP_ATTN_FULL:
             residual = residual.tensor_split(context.attn_tp_size)[context.attn_tp_rank]
         if hidden_states.shape[0] != 0:
-            if not CommunicateWithAllReduceAndLayerNormFn._skip_layernorm(forward_batch):
+            if not CommunicateWithAllReduceAndLayerNormFn._skip_layernorm(
+                forward_batch
+            ):
                 hidden_states, residual = layernorm(hidden_states, residual)
             elif CommunicateWithAllReduceAndLayerNormFn._use_bailing_rms_quant(
                 forward_batch
@@ -1297,8 +1312,10 @@ class CommunicateWithAllReduceAndLayerNormFn:
         elif CommunicateWithAllReduceAndLayerNormFn._use_bailing_rms_quant(
             forward_batch
         ):
-            hidden_states, _ = CommunicateWithAllReduceAndLayerNormFn._bailing_rms_quant(
-                residual, layernorm, None, forward_batch
+            hidden_states, _ = (
+                CommunicateWithAllReduceAndLayerNormFn._bailing_rms_quant(
+                    residual, layernorm, None, forward_batch
+                )
             )
         return hidden_states, residual
 

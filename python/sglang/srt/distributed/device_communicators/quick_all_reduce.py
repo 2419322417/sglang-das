@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -240,7 +243,8 @@ class QuickAllReduce:
         if self.use_fp16_kernels:
             dtype = torch.float16
         return (
-            inp_size <= self.qr_max_size
+            inp_size
+            <= self.qr_max_size
             # and inp_size
             # >= self._QR_MIN_SIZE[(dtype, self.world_size)][self.qr_quant_level.value]
         )

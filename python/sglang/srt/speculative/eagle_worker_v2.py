@@ -159,7 +159,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         self.target_worker = target_worker
         self.attn_cp_rank = attn_cp_rank
         self.moe_dp_rank = moe_dp_rank
-
+        # Detect mHC (multi-hidden-context) models that need pre-normalization
+        # hidden states for their NextN draft layers (e.g., DeepSeek-V4-Flash
+        # with hc_mult > 1). Mirrors the same detection in EAGLEWorkerV2.
+        self.need_hidden_states_before_norm = (
+            getattr(target_worker.model_runner.model_config, "hc_hidden_size", None)
+            is not None
+        )
         # Args for easy access
         self.device = server_args.device
         self.topk = server_args.speculative_eagle_topk
@@ -832,6 +838,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         batch.capture_hidden_mode = capture_hidden_mode
         forward_batch = ForwardBatch.init_new(batch, self.draft_runner)
         forward_batch.return_logprob = False
+        forward_batch.return_hidden_states_before_norm = (
+            self.need_hidden_states_before_norm
+        )
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
 
@@ -1082,6 +1091,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
         self.speculative_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        self.need_hidden_states_before_norm = (
+            getattr(target_worker.model_runner.model_config, "hc_hidden_size", None)
+            is not None
+        )
 
         # Override the context length of the draft model to be the same as the target model.
         server_args.override(
@@ -1174,6 +1187,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 else CaptureHiddenMode.FULL
             )
             batch.capture_hidden_mode = target_capture_mode
+            batch.return_hidden_states_before_norm = self.need_hidden_states_before_norm
             batch_output = self.target_worker.forward_batch_generation(batch)
 
             # Spec_v2 convention: batch.seq_lens = length BEFORE this iter's tokens.
@@ -1556,6 +1570,9 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 self.req_to_token_pool,
                 batch,
                 self.target_worker,
+            )
+            verify_forward_batch.return_hidden_states_before_norm = (
+                self.need_hidden_states_before_norm
             )
 
         # Cover post-prepare rebinds: draft_token, plan_stream-allocated out_cache_loc.

@@ -1964,3 +1964,69 @@ actual result in the checkpoint note.
     to VRAM/HCU 0%.
 - Detailed evidence:
   `docs/internal/dcu-v0.5.15-post1-dev-forward-port-20260722-conflict-review.md`.
+
+### v0.5.12_dev daily forward-port / `ac04c9cb` (2026-07-29)
+
+- Branch: `forward-port/v0.5.12-dev-daily-20260729`.
+- Target parent: `997e64560f65d6dffa96b191ca3eb3961903620a`
+  (`v0.5.15.post1_dev`); source endpoint: `ac04c9cb4471d3486930824196f481896f6aa1b4`.
+- Range: `5dd9ba2f2c48e98aa0f244a665bb67cde7141699..ac04c9cb`, 82 full-graph
+  commits (31 first-parent commits), spanning the HCU rename, LightOp/MLA,
+  DeepGEMM/KME, DeepSeek-V4 INT8/MTP, Qwen3-Coder, GLM-5.1 NSA, and CI updates.
+- Merge: `d42b0a3bf6b4317fd3d420375b4d16239b96e3cb`; focused LightOp compatibility
+  fix: `3b4327cd7bb428ab98828f0cdc31106d51cd86b2`.
+- Conflict/refactor decisions:
+  - retained the current target structure for refactored allocator, CUDA-graph
+    runner, DSV4 JIT, EAGLE v2, and target test registration paths; obsolete
+    source files were not restored;
+  - retained compatible source runtime, kernel, HCU, LightOp, quantization,
+    DSV4, cache, scheduler, and model changes; test tree stays on the target
+    API because source test merges were syntactically incompatible;
+  - runtime audit found no `_is_dcu` / `is_dcu` predicate in `python/sglang/srt`,
+    `python/sglang/kernels`, or `sgl-kernel`; platform-specific paths use
+    `_is_hcu` conventions. `SGLANG_USE_AITER_AG=0` remains unchanged.
+- Static validation passed: zero unmerged entries, precise marker scan,
+  `git diff --check`, 158 changed Python files compiled, HCU registration
+  (290 files), DSA alias/CLI/registry (19 tests), and gfx938 HIP metadata
+  (0 unsupported CUDA calls, 56 replaced launches). Ruff is unavailable in
+  `rye_sglang_0716`.
+- 0729 runtime compatibility review (2026-07-29):
+  - the user-provided 0729 traceback showed the import-time `NameError`: the
+    INT8 DeepGEMM custom-op rename was only partially resolved in
+    `ep_moe/layer.py`;
+  - repaired the full definition/import/registration/call chain for
+    `m_grouped_i8_gemm_nt_masked`, updated it to the installed DeepGEMM
+    `shuffle_unique` API, and removed stale W8A8/LightOp aliases;
+  - audited source feature commits `864b3413b` and `7b89bf661` against the
+    refactored target tree. Fixed mixed DeepGEMM/LightOp INT8 weight packing,
+    the DSV4 CP pre-hc-head return order, and moved the mHC target-verify flag
+    into the current decode-graph runner, TBO split, and EAGLE v2 paths;
+  - the first post-fix pure-TP launch on idle
+    `zz-nmz26 / rye_sglang_0729` passed import, distributed init, 46-shard
+    loading, memory pool creation, and reached decode graph capture. It exposed a second
+    partial rename: `scaled_fp8_quant()` called
+    `lightop_per_token_quant_fp8` without importing it. The HCU import now
+    uses the installed `lightop.quant.per_token_quant_fp8` API;
+  - a 140-file AST/symbol audit then found and repaired the remaining provable
+    merge residues: undefined MegaMoE LightOp alias, dropped `fp8_min` import,
+    stale MLA helper `layer_id` plus duplicate store, undefined DeepEP packing
+    mode helper, stale Qwen3 runtime accessor, missing HCU cookbook helpers,
+    a stale removed MiMo cookbook registration, and incomplete HIP variable
+    renames in multimodal tests;
+  - after these repairs, the audit reports zero undefined custom-op refs and
+    zero possible undefined globals except Python's implicit `__file__` in
+    five modules. The remaining duplicate-import findings are intentional
+    platform/backend overrides;
+  - static validation passed: zero unmerged entries, no precise markers,
+    `git diff --check`, compilation of all 140 forward-port Python files,
+    six high-risk module imports, HCU registration (290 files), and DSA alias
+    tests. Ruff remains unavailable in the 0729 image;
+  - a final model retry was not started because the resource preflight found
+    all candidates occupied: `zz-nmz26` changed from 0% to 59% VRAM after an
+    unrelated DeepSeek-V3.2 process appeared; `zz-nmz22` had 4%, `zz-nmz15`
+    65%, and `zz-nmz18` 80-93% VRAM. Per workflow, runtime validation stops at
+    this point rather than interfering with another user.
+- Pure-TP status: original import failure is fixed and the second launch
+  progressed to graph capture; the final post-audit patch set is statically
+  validated but awaits one clean-machine pure-TP rerun. The branch remains
+  deliberately **not** merged.

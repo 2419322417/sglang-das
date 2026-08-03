@@ -28,6 +28,7 @@ from sglang.srt.layers.amx_utils import (
 )
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
+from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.parameter import ChannelQuantScaleParameter, ModelWeightParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -35,7 +36,6 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
@@ -51,7 +51,8 @@ from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
-from lmslim import quant_ops
+
+from lightop import gemm_ops as quant_ops
 
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
@@ -128,9 +129,9 @@ class W8A8Int8Config(QuantizationConfig):
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.linear import LinearBase
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
-        from sglang.srt.layers.radix_attention import RadixAttention
         from sglang.srt.layers.quantization.fp8 import Fp8KVCacheMethod
         from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
+        from sglang.srt.layers.radix_attention import RadixAttention
 
         if isinstance(layer, LinearBase):
             if should_ignore_layer(

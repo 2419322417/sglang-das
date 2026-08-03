@@ -49,8 +49,8 @@ from sglang.srt.state_capturer.indexer_topk import get_global_indexer_capturer
 from sglang.srt.utils import (
     add_prefix,
     is_cuda,
-    is_hcu,
     is_gfx95_supported,
+    is_hcu,
     is_hip,
 )
 from sglang.srt.utils.common import is_gfx942_supported, is_sm120_supported
@@ -330,6 +330,7 @@ def topk_transform_512_pytorch_vectorized(
         raw_indices.masked_fill_(~valid_topk, -1)
         out_raw_indices.copy_(raw_indices)
 
+
 @triton.jit
 def _fused_scale_kernel(
     weight_ptr,
@@ -468,10 +469,10 @@ class C4IndexerBackendMixin:
         #         return y, s
 
         #     q_fp8, q_scale = act_quant_group_lightop(q)
-    
+
         # else:
         #     q_fp8, q_scale = act_quant(q) # init
-        
+
         weights = c4_indexer.compute_weights(x, skip_scale=True)
         q, weights = c4_indexer.compute_q(q_lora, positions, weights)
         if not skip_compressor:
@@ -737,7 +738,7 @@ class C4IndexerBackendMixin:
                 )
             else:
                 # from deep_gemm import fp8_paged_mqa_logits as fn
-                from lightop.gemmopt import paged_mqa_logits as fn
+                from lightop.attention import paged_mqa_logits as fn
 
         query_rows = q_indexer[0].shape[0] if use_fp4_indexer else q_indexer.shape[0]
 
@@ -854,6 +855,7 @@ class C4IndexerBackendMixin:
             )
         elif _is_hcu and envs.SGLANG_LIGHTOP_TOPK.get():
             from lightop import topk_transform_512 as lightop_topk_transform_512
+
             lightop_topk_transform_512(
                 logits,
                 indexer_metadata.c4_seq_lens,

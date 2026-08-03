@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1134,9 +1137,7 @@ class Scheduler(
             and self.server_args.enable_dp_attention
         ):
             if not self.require_mlp_sync:
-                raise RuntimeError(
-                    "PD Decode DP sync requires require_mlp_sync=True"
-                )
+                raise RuntimeError("PD Decode DP sync requires require_mlp_sync=True")
             if self.pp_size != 1:
                 raise RuntimeError(
                     "PD Decode DP sync currently supports pp_size=1 only"
@@ -1146,18 +1147,10 @@ class Scheduler(
                     "PD Decode DP sync currently supports attn_tp_size=1 and "
                     "attn_cp_size=1 only"
                 )
-            if not self.server_args.enable_dp_attention_local_control_broadcast:
-                raise RuntimeError(
-                    "PD Decode DP sync requires "
-                    "--enable-dp-attention-local-control-broadcast "
-                    "to keep recv control off the full tp_cpu_group"
-                )
 
             tp_ranks = list(self.tp_group.ranks)
             expected_world = (
-                self.server_args.dp_size
-                * self.attn_tp_size
-                * self.attn_cp_size
+                self.server_args.dp_size * self.attn_tp_size * self.attn_cp_size
             )
             default_world = torch.distributed.get_world_size()
             if len(tp_ranks) != expected_world or len(tp_ranks) != default_world:
@@ -1243,7 +1236,7 @@ class Scheduler(
                 scheduler=self,
                 tree_cache=self.tree_cache,
             )
-           
+
             # The decode requests pending for pre-allocation
             self.disagg_decode_prealloc_queue = DecodePreallocQueue(
                 req_to_token_pool=self.req_to_token_pool,

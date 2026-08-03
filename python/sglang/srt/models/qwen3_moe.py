@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Adapted from qwen2_moe.py
 
 # Copyright 2023-2024 SGLang Team
@@ -81,11 +84,11 @@ from sglang.srt.runtime_context import (
 )
 from sglang.srt.utils import (
     LazyValue,
-    get_bool_env_var,
     add_prefix,
+    get_bool_env_var,
     is_cuda,
-    is_hcu,
     is_flashinfer_available,
+    is_hcu,
     is_non_idle_and_non_empty,
     is_npu,
 )
@@ -284,7 +287,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=add_prefix("gate", prefix),
         )
 
@@ -549,11 +552,12 @@ class Qwen3MoeAttention(nn.Module):
         self.alt_stream = alt_stream
         self.page_size = 64
         self.layer_id = layer_id
-        if get_global_server_args().kv_cache_dtype == "fp8_e4m3":
+        kv_cache_dtype = get_server_args().kv_cache_dtype
+        if kv_cache_dtype == "fp8_e4m3":
             self.kv_cache_dtype = torch.float8_e4m3fn
-        elif get_global_server_args().kv_cache_dtype == "fp8_e5m2":
+        elif kv_cache_dtype == "fp8_e5m2":
             self.kv_cache_dtype = torch.float8_e5m2
-        elif get_global_server_args().kv_cache_dtype in ("bf16", "bfloat16"):
+        elif kv_cache_dtype in ("bf16", "bfloat16"):
             self.kv_cache_dtype = torch.bfloat16
 
     def op_prepare(self, state):
@@ -640,11 +644,10 @@ class Qwen3MoeAttention(nn.Module):
             if _is_hcu and _use_fused_qwen_bailing_rotary:
                 # Fused RMSNorm + RoPE + kv_store path through custom op.
                 cos_sin_cache = self.rotary_emb.cos_sin_cache
-                if (cos_sin_cache.device != q.device
-                        or cos_sin_cache.dtype != q.dtype):
-                    cos_sin_cache = cos_sin_cache.to(q.device,
-                                                    dtype=q.dtype,
-                                                    non_blocking=True)
+                if cos_sin_cache.device != q.device or cos_sin_cache.dtype != q.dtype:
+                    cos_sin_cache = cos_sin_cache.to(
+                        q.device, dtype=q.dtype, non_blocking=True
+                    )
                     # Persist the converted cache so we don't re-copy/re-allocate
                     # on every forward when the original buffer starts on CPU.
                     self.rotary_emb.cos_sin_cache = cos_sin_cache
@@ -671,7 +674,7 @@ class Qwen3MoeAttention(nn.Module):
                     v_scale=None,
                     epsilon=self.q_norm.variance_epsilon,
                 )
-            else:    
+            else:
                 q, k = apply_qk_norm(
                     q=q,
                     k=k,

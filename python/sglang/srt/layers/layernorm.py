@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright 2023-2024 SGLang Team
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,11 +41,11 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_flashinfer_available,
+    is_hcu,
     is_hip,
     is_musa,
     is_npu,
     is_xpu,
-    is_hcu
 )
 
 _is_cuda = is_cuda()
@@ -112,8 +115,8 @@ elif _is_hip:
         # Fallback: vllm not available, will use forward_native
         _has_vllm_rms_norm = False
 if _is_hcu:
-    from lightop import op 
     from lightop import gemma_fused_add_rmsnorm as gemma_fused_add_rmsnorm_hcu
+    from lightop import op
 
 if _is_hip:
     try:
@@ -484,10 +487,14 @@ class RMSNorm(MultiPlatformOp):
                 if post_residual_addition is not None:
                     residual = residual + post_residual_addition
                 fused_add_rms_norm(
-                    out, x, residual_out, residual, self.weight.data, self.variance_epsilon
+                    out,
+                    x,
+                    residual_out,
+                    residual,
+                    self.weight.data,
+                    self.variance_epsilon,
                 )
                 return out, residual_out
-                
 
         out = torch.empty_like(x)
         op.rms_norm_opt(out, x, self.weight.data, self.variance_epsilon)
@@ -812,7 +819,7 @@ class GemmaRMSNorm(MultiPlatformOp):
                 if post_residual_addition is not None:
                     residual = residual + post_residual_addition
                 if _is_hcu:
-                    out, residual_out=gemma_fused_add_rmsnorm_hcu(
+                    out, residual_out = gemma_fused_add_rmsnorm_hcu(
                         x, residual, self.weight.data, self.variance_epsilon
                     )
                     return out, residual_out
@@ -820,8 +827,8 @@ class GemmaRMSNorm(MultiPlatformOp):
                     out = torch.empty_like(x)
                     residual_out = torch.empty_like(x)
                     fused_add_rms_norm(
-                    out, x, residual_out, residual, w, self.variance_epsilon
-                )
+                        out, x, residual_out, residual, w, self.variance_epsilon
+                    )
                     return out, residual_out
             out = torch.empty_like(x)
             rms_norm(out, x, w, self.variance_epsilon)

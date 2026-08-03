@@ -1,5 +1,9 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/index.py
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -23,7 +27,11 @@ def prepare_chunk_indices(
             for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
         ]
     )
-    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).pin_memory().to(cu_seqlens, non_blocking=True)
+    return (
+        torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
+        .pin_memory()
+        .to(cu_seqlens, non_blocking=True)
+    )
 
 
 @tensor_cache

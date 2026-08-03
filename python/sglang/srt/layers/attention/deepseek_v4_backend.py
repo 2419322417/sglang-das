@@ -35,6 +35,10 @@ import torch.nn.functional as F
 from sglang.jit_kernel.dsv4.online_c128_mtp import OnlineC128MTPController
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.debug_flash_mla_adapter import (
+    flash_mla_with_kvcache_entrypoint,
+)
+from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
 from sglang.srt.layers.attention.dsv4.attn_metadata_kernels import (
     BuildCausalSwaPageIndices,
     BuildPageTablePositions,
@@ -58,18 +62,13 @@ from sglang.srt.layers.attention.dsv4.metadata import (
 from sglang.srt.layers.attention.dsv4.metadata_kernel import (
     init_compression_metadata as _init_compression_metadata_triton,
 )
-from sglang.srt.layers.attention.dsv4.sparse_prefill_utils import (
-    SparsePrefillChunkCache,
-    SparsePrefillWorkspace,
-)
-from sglang.srt.layers.attention.debug_flash_mla_adapter import (
-    flash_mla_with_kvcache_entrypoint,
-)
-from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
-
 from sglang.srt.layers.attention.dsv4.quant_k_cache import (
     quant_to_nope_fp8_rope_bf16_pack_lightop,
     quant_to_nope_fp8_rope_bf16_pack_triton,
+)
+from sglang.srt.layers.attention.dsv4.sparse_prefill_utils import (
+    SparsePrefillChunkCache,
+    SparsePrefillWorkspace,
 )
 from sglang.srt.mem_cache.deepseek_v4_memory_pool import DeepSeekV4TokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -309,9 +308,9 @@ class DSV4AttnMetadata:
 
     def init_compression_metadata(self):
         assert self.page_table.dim() == 2
-        assert self.raw_out_loc.shape == self.seq_lens_casual.shape, (
-            f"{self.raw_out_loc.shape=}, {self.seq_lens_casual.shape=}"
-        )
+        assert (
+            self.raw_out_loc.shape == self.seq_lens_casual.shape
+        ), f"{self.raw_out_loc.shape=}, {self.seq_lens_casual.shape=}"
 
         (
             self.c4_out_loc,
@@ -365,9 +364,9 @@ class DSV4AttnMetadata:
         expected_local_len = pre_global_len // cp_size
         for field_name in self._CP_REINDEX_FIELDS:
             val = getattr(self, field_name, None)
-            assert isinstance(val, torch.Tensor), (
-                f"CP reindex: {field_name} is {type(val)}, expected Tensor"
-            )
+            assert isinstance(
+                val, torch.Tensor
+            ), f"CP reindex: {field_name} is {type(val)}, expected Tensor"
             setattr(self, field_name, val[idx].contiguous())
 
         for field_name in self._CP_REINDEX_FIELDS:
@@ -533,9 +532,9 @@ class DeepseekV4AttnBackend(
         self.model_runner = model_runner
         self.device = torch.device(model_runner.device)
         head_dim = model_runner.model_config.head_dim
-        assert head_dim == 512, (
-            "DSV4 MQA head_dim = qk_nope_head_dim(448) + qk_rope_head_dim(64) = 512"
-        )
+        assert (
+            head_dim == 512
+        ), "DSV4 MQA head_dim = qk_nope_head_dim(448) + qk_rope_head_dim(64) = 512"
         self.softmax_scale: float = head_dim**-0.5
         self.head_dim_v: int = model_runner.model_config.v_head_dim
         self.cuda_int32_kwargs = {"device": self.device, "dtype": torch.int32}
@@ -1887,13 +1886,13 @@ class DeepseekV4AttnBackend(
 
             flashmla_metadata = core_attn_metadata.get_flashmla_metadata(compress_ratio)
 
-            assert swa_page_indices.shape[-1] % 64 == 0, (
-                f"{swa_page_indices.shape=}'s last dimension is not aligned to 64"
-            )
+            assert (
+                swa_page_indices.shape[-1] % 64 == 0
+            ), f"{swa_page_indices.shape=}'s last dimension is not aligned to 64"
             if extra_indices is not None:
-                assert extra_indices.shape[-1] % 64 == 0, (
-                    f"{extra_indices.shape=}'s last dimension is not aligned to 64"
-                )
+                assert (
+                    extra_indices.shape[-1] % 64 == 0
+                ), f"{extra_indices.shape=}'s last dimension is not aligned to 64"
 
             if not _is_hcu:
                 if q.ndim == 3:
