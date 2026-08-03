@@ -39,7 +39,6 @@ from functools import total_ordering
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 import torch
-from sgl_kernel.kvcacheio import hcu_create_chunked_prefix_cache_kv_indices
 
 from sglang.kernels.ops.attention.position import compute_position_triton
 from sglang.srt.environ import envs
@@ -1179,6 +1178,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         self.attn_attend_prefix_cache = attn_attend_prefix_cache
 
     def prepare_chunked_kv_indices(self, device: torch.device):
+        # Imported lazily: sgl_kernel is a compiled extension that needs a GPU
+        # runtime, so importing it at module scope breaks CPU-only environments.
+        from sgl_kernel.kvcacheio import hcu_create_chunked_prefix_cache_kv_indices
+
         self.prefix_chunk_kv_indices = []
         for idx in range(self.num_prefix_chunks):
             chunk_starts = self.prefix_chunk_starts[idx]
