@@ -87,78 +87,48 @@ def rocblas_scaled_mm(a: torch.Tensor,
 
     return quant_ops.rocblas_scaled_mm_nn(a, b, scale_a, scale_b, out_dtype, bias)
 
+def _prefer_kme_channelwise(device: torch.device) -> bool:
+    """gfx928 uses lightop hipblaslt_w8a8_channelwise_gemm_kme (bf16 C/D, fp32 compute)."""
+    if device.type != "cuda":
+        return False
+    device_props = torch.cuda.get_device_properties(device)
+    gcn_arch = getattr(device_props, "gcnArchName", "").split(":")[0]
+    return gcn_arch == "gfx928"
+
+
 def blaslt_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
                       scale_b: torch.Tensor,
                       out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """W8A8 scaled GEMM via hipBLASLt.
+    """W8A8 scaled GEMM via hipBLASLt (lightop).
 
-    Preferred path on KME/gfx928: lmslim ``hipblaslt_gemm_channelwise_kme``
-    (swapped TN, bf16 C/D, fp32 compute) with weight layout ``[K, N]``
-    col-major stride ``(1, K)``.
+    On KME/gfx928: ``lightop.gemm_ops.hipblaslt_w8a8_channelwise_gemm_kme``
+    with contiguous weight ``[N, K]`` and logical NT.
 
-    Fallback: legacy ``hipblaslt_w8a8_gemm`` expecting contiguous weight
-    ``[N, K]`` (NT logical / TN API).
+    Elsewhere: ``hipblaslt_w8a8_gemm`` with the same ``[N, K]`` NT layout.
+
+    Compat: old KME packed ``[K, N]`` stride ``(1, K)`` is converted to ``[N, K]``.
     """
     m, k = a.shape[-2], a.shape[-1]
-    # KME packed weight: [K, N] with stride (1, K)
+    # Compat for previously packed KME weights: [K, N] stride (1, K)
     if b.dim() == 2 and b.shape[0] == k and b.stride(0) == 1 and b.stride(1) == k:
-        n = b.shape[1]
-        return _blaslt_scaled_mm_kme(a, b, scale_a, scale_b, m, n, k, out_dtype, bias)
-
-    # Legacy contiguous [N, K]
+        b = b.t().contiguous()
     n = b.shape[0]
-    _, out = quant_ops.hipblaslt_w8a8_gemm(
-        a, b, scale_a, scale_b, m, n, k, "NT", out_dtype
+
+    use_kme = (
+        _prefer_kme_channelwise(a.device)
+        and hasattr(quant_ops, "hipblaslt_w8a8_channelwise_gemm_kme")
     )
-    return out
-
-
-def _blaslt_scaled_mm_kme(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scale_a: torch.Tensor,
-    scale_b: torch.Tensor,
-    m: int,
-    n: int,
-    k: int,
-    out_dtype: torch.dtype,
-    bias: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Logical O[M,N]=X[M,K]@W[K,N] via hipblaslt_gemm_channelwise_kme TN."""
-    import lmslimquant
-
-    if out_dtype is not torch.bfloat16:
-        raise ValueError("hipblaslt_gemm_channelwise_kme currently requires bfloat16 out")
-    if not a.is_contiguous():
-        a = a.contiguous()
-    scale_a = scale_a.reshape(-1).contiguous()
-    scale_b = scale_b.reshape(-1).contiguous()
-    bias_arg = None
-    if bias is not None:
-        if bias.dtype != out_dtype:
-            bias = bias.to(out_dtype)
-        bias_arg = bias.reshape(-1).contiguous()
-    alpha = torch.tensor(1, dtype=torch.int32)
-    beta = torch.tensor(0, dtype=torch.int32)
-    # API (m,n,k)=(N,M,K), A=W, B=X, trans=TN
-    out = lmslimquant.hipblaslt_gemm_channelwise_kme(
-        b,
-        a,
-        scale_b,
-        scale_a,
-        out_dtype,
-        n,
-        m,
-        k,
-        1,
-        "TN",
-        alpha,
-        beta,
-        bias_arg,
-    )
+    if use_kme:
+        _, out = quant_ops.hipblaslt_w8a8_channelwise_gemm_kme(
+            a, b, scale_a, scale_b, m, n, k, "NT", out_dtype, bias
+        )
+    else:
+        _, out = quant_ops.hipblaslt_w8a8_gemm(
+            a, b, scale_a, scale_b, m, n, k, "NT", out_dtype
+        )
     if out.dim() == 3:
         out = out.squeeze(0)
     return out
