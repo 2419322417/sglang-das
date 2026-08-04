@@ -62,7 +62,7 @@ def apply_deepseek_v4_defaults(server_args: "ServerArgs", model_arch: str) -> No
             envs.SGLANG_ENABLE_SPEC_V2.set(True)
             logger.warning("Spec v2 is enabled for EAGLE speculative decoding.")
 
-    if server_args.swa_full_tokens_ratio == ServerArgs.swa_full_tokens_ratio:
+    if server_args.swa_full_tokens_ratio is None:
         server_args.swa_full_tokens_ratio = 0.1
         logger.info(
             f"Setting swa_full_tokens_ratio to {server_args.swa_full_tokens_ratio} for {model_arch}."
