@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 def apply_deepseek_v4_defaults(server_args: "ServerArgs", model_arch: str) -> None:
     """Apply DeepSeek V4 model-specific server arg defaults and constraints."""
     from sglang.srt.environ import envs
-    from sglang.srt.server_args import ServerArgs
 
     server_args.attention_backend = "dsv4"
     server_args.page_size = 256

@@ -2919,8 +2919,10 @@ class Scheduler(
                 if (
                     len(adder.can_run_list) == 0
                     and len(self.running_batch.reqs) == 0
-                    and (self.chunked_req is None
-                        or not self._chunked_req_scheduled_last_iter)
+                    and (
+                        self.chunked_req is None
+                        or not self._chunked_req_scheduled_last_iter
+                    )
                 ):
                     self._abort_request(
                         req,
