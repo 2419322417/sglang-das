@@ -1259,9 +1259,7 @@ class HiCacheController:
         if ack.completed_tokens is None:
             return
 
-        completed_tokens_tensor = torch.tensor(
-            ack.completed_tokens, dtype=torch.int
-        )
+        completed_tokens_tensor = torch.tensor(ack.completed_tokens, dtype=torch.int)
         self._all_reduce(
             completed_tokens_tensor,
             torch.distributed.ReduceOp.MIN,

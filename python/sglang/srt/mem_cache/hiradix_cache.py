@@ -63,12 +63,14 @@ from sglang.srt.mem_cache.utils import (
 )
 from sglang.srt.observability.metrics_collector import StorageMetricsCollector
 from sglang.srt.utils import get_bool_env_var
+
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
 _kv_layout_hcu_fa = get_bool_env_var("SGLANG_KV_LAYOUT_HCU_FA", default="true")
+
 
 class HiRadixCache(RadixCache):
 
@@ -845,9 +847,7 @@ class HiRadixCache(RadixCache):
                 if not finish_event.query():
                     break
                 finish_count += 1
-        finish_count_tensor = torch.tensor(
-            finish_count, dtype=torch.int, device="cpu"
-        )
+        finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
         self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = int(finish_count_tensor.item())
         while finish_count > 0:
@@ -869,9 +869,7 @@ class HiRadixCache(RadixCache):
                 if not finish_event.query():
                     break
                 finish_count += 1
-        finish_count_tensor = torch.tensor(
-            finish_count, dtype=torch.int, device="cpu"
-        )
+        finish_count_tensor = torch.tensor(finish_count, dtype=torch.int, device="cpu")
         self._all_reduce(finish_count_tensor, torch.distributed.ReduceOp.MIN)
         finish_count = int(finish_count_tensor.item())
         while finish_count > 0:
