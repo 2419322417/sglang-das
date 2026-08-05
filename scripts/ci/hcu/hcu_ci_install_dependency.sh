@@ -82,7 +82,11 @@ fi
 if [[ -n "${INSTALL_WHEEL_URLS}" ]]; then
   echo "[hcu-ci] Installing HCU wheels from explicit URLs or local paths"
   echo "[hcu-ci] HCU_CI_INSTALL_WHEEL_URLS=${INSTALL_WHEEL_URLS}"
-  run_in_container "python3 -m pip uninstall -y sglang sgl-kernel sglang-kernel sgl-model-gateway || true"
+  UNINSTALL_PACKAGES="sglang sgl-kernel sglang-kernel sgl-model-gateway"
+  if [[ "${INSTALL_WHEEL_URLS//-/_}" == *"sglang_router_"* || "${INSTALL_WHEEL_URLS//-/_}" == *"sgl_model_gateway_"* ]]; then
+    UNINSTALL_PACKAGES="${UNINSTALL_PACKAGES} sglang-router"
+  fi
+  run_in_container "python3 -m pip uninstall -y ${UNINSTALL_PACKAGES} || true"
   install_with_retry docker exec "${CONTAINER}" \
     python3 -m pip install --no-cache-dir --no-deps ${INSTALL_WHEEL_URLS}
   echo "[hcu-ci] Installed wheel import paths:"

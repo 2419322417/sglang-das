@@ -73,6 +73,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_gateway_wheel:
+        description: "Require the sgl-model-gateway wheel in forced wheel mode"
+        required: false
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       ref:
@@ -105,6 +110,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_gateway_wheel:
+        description: "Require the sgl-model-gateway wheel in forced wheel mode"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -121,8 +131,8 @@ jobs:
     name: Check changes
     runs-on: ${{ inputs.runner_label || vars.HCU_CI_RUNNER_LABEL || 'ubuntu-latest' }}
     outputs:
-      hcu: ${{ steps.filter.outputs.hcu || steps.run-mode.outputs.run_all_tests }}
-      auto_run_ci: ${{ steps.filter.outputs.auto_run_ci || 'false' }}
+      hcu: ${{ steps.paths.outputs.hcu || steps.run-mode.outputs.run_all_tests }}
+      auto_run_ci: ${{ steps.paths.outputs.hcu || 'false' }}
       run_stage_a: ${{ steps.plan.outputs.run_stage_a }}
       run_stage_b: ${{ steps.plan.outputs.run_stage_b }}
       wheel_required: ${{ steps.wheel.outputs.wheel_required }}
@@ -163,33 +173,36 @@ jobs:
             echo "run_all_tests=false" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Detect HCU-relevant changes
-        id: filter
-        if: steps.run-mode.outputs.run_all_tests != 'true'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          cd "${HCU_CI_CHECKOUT_DIR}"
-          if [[ -z "${BASE_SHA}" ]]; then
-            echo "hcu=true" >> "${GITHUB_OUTPUT}"
-            echo "auto_run_ci=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          changed_files="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
-          echo "${changed_files}"
-
-          hcu_path_pattern='^(\.github/workflows/(pr-test-hcu|pr-gate|release-pr-hcu|hcu-full-enabled|release-pypi-nightly-hcu)\.yml|scripts/ci/hcu/|python/pyproject.*\.toml|python/sglang/|test/run_suite\.py|python/sglang/test/ci/|test/registered/|sgl-kernel/|sgl-model-gateway/|requirements_hcu\.txt$)'
-
-          if echo "${changed_files}" | grep -Eq "${hcu_path_pattern}"; then
-            echo "hcu=true" >> "${GITHUB_OUTPUT}"
-            echo "auto_run_ci=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "hcu=false" >> "${GITHUB_OUTPUT}"
-            echo "auto_run_ci=false" >> "${GITHUB_OUTPUT}"
-          fi
+      # Use the PR files API so base-only changes on a stale branch are excluded.
+      - name: Detect HCU-relevant PR paths
+        id: paths
+        if: github.event_name == 'pull_request' && steps.run-mode.outputs.run_all_tests != 'true'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            hcu:
+              - '.github/workflows/pr-test-hcu.yml'
+              - '.github/workflows/pr-gate.yml'
+              - '.github/workflows/release-pr-hcu.yml'
+              - '.github/workflows/hcu-full-enabled.yml'
+              - '.github/workflows/release-pypi-nightly-hcu.yml'
+              - 'scripts/ci/hcu/**'
+              - 'python/pyproject*.toml'
+              - 'python/sglang/**'
+              - 'test/run_suite.py'
+              - 'test/registered/**'
+              - 'sgl-kernel/**'
+              - 'sgl-model-gateway/**'
+              - 'requirements_hcu.txt'
+            wheel:
+              - '.github/workflows/release-pr-hcu.yml'
+              - 'python/pyproject*.toml'
+              - 'python/sglang/**'
+              - 'sgl-kernel/**'
+              - 'sgl-model-gateway/**'
+              - 'requirements_hcu.txt'
+            gateway:
+              - 'sgl-model-gateway/**'
 
       - name: Select HCU stages
         id: plan
@@ -227,10 +240,18 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           FORCE_WHEEL_MODE: ${{ inputs.force_wheel_mode || false }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORCE_GATEWAY_WHEEL: ${{ inputs.force_gateway_wheel || false }}
+          WHEEL_CHANGED: ${{ steps.paths.outputs.wheel || 'false' }}
+          GATEWAY_CHANGED: ${{ steps.paths.outputs.gateway || 'false' }}
         run: |
           set -euo pipefail
+
+          if [[ "${FORCE_GATEWAY_WHEEL}" == "true" ]]; then
+            echo "wheel_required=true" >> "${GITHUB_OUTPUT}"
+            echo "gateway_wheel_required=true" >> "${GITHUB_OUTPUT}"
+            echo "Gateway wheel mode forced by workflow input."
+            exit 0
+          fi
 
           if [[ "${FORCE_WHEEL_MODE}" == "true" ]]; then
             echo "wheel_required=true" >> "${GITHUB_OUTPUT}"
@@ -239,30 +260,15 @@ jobs:
             exit 0
           fi
 
-          if [[ "${EVENT_NAME}" != "pull_request" || -z "${BASE_SHA}" ]]; then
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
             echo "wheel_required=false" >> "${GITHUB_OUTPUT}"
             echo "gateway_wheel_required=false" >> "${GITHUB_OUTPUT}"
             echo "Wheel mode disabled for non-PR run without force_wheel_mode."
             exit 0
           fi
 
-          cd "${HCU_CI_CHECKOUT_DIR:-${GITHUB_WORKSPACE}}"
-
-          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          changed_files="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
-          echo "${changed_files}"
-
-          wheel_required=false
-          gateway_wheel_required=false
-
-          if echo "${changed_files}" | grep -Eq '^(\.github/workflows/release-pr-hcu\.yml$|sgl-kernel/|requirements_hcu\.txt$|python/pyproject.*\.toml|python/sglang/)'; then
-            wheel_required=true
-          fi
-
-          if echo "${changed_files}" | grep -Eq '^sgl-model-gateway/'; then
-            wheel_required=true
-            gateway_wheel_required=true
-          fi
+          wheel_required="${WHEEL_CHANGED}"
+          gateway_wheel_required="${GATEWAY_CHANGED}"
 
           echo "wheel_required=${wheel_required}" >> "${GITHUB_OUTPUT}"
           echo "gateway_wheel_required=${gateway_wheel_required}" >> "${GITHUB_OUTPUT}"
@@ -534,7 +540,7 @@ jobs:
               name = path.name.replace("-", "_")
               if name.startswith(("sgl_kernel_", "sglang_kernel_")):
                   return "sgl-kernel"
-              if name.startswith("sgl_model_gateway_"):
+              if name.startswith(("sglang_router_", "sgl_model_gateway_")):
                   return "sgl-model-gateway"
               if name.startswith("sglang_"):
                   return "sglang"
