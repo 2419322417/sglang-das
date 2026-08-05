@@ -20,8 +20,7 @@ on:
       - ".github/workflows/hcu-full-enabled.yml"
       - ".github/workflows/release-pypi-nightly-hcu.yml"
       - "scripts/ci/hcu/**"
-      - "python/pyproject*.toml"
-      - "python/sglang/**"
+      - "python/**"
       - "test/run_suite.py"
       - "test/registered/**"
       - "sgl-kernel/**"
@@ -187,8 +186,7 @@ jobs:
               - '.github/workflows/hcu-full-enabled.yml'
               - '.github/workflows/release-pypi-nightly-hcu.yml'
               - 'scripts/ci/hcu/**'
-              - 'python/pyproject*.toml'
-              - 'python/sglang/**'
+              - 'python/**'
               - 'test/run_suite.py'
               - 'test/registered/**'
               - 'sgl-kernel/**'
@@ -196,8 +194,7 @@ jobs:
               - 'requirements_hcu.txt'
             wheel:
               - '.github/workflows/release-pr-hcu.yml'
-              - 'python/pyproject*.toml'
-              - 'python/sglang/**'
+              - 'python/**'
               - 'sgl-kernel/**'
               - 'sgl-model-gateway/**'
               - 'requirements_hcu.txt'
