@@ -209,32 +209,13 @@ jobs:
 
           staging_dir = pathlib.Path(os.environ["STAGING_DIR"])
           wheel_dir = staging_dir / "wheels"
-          wheel_paths = sorted(wheel_dir.glob("*.whl"))
-          wheels = [str(path.relative_to(staging_dir)) for path in wheel_paths]
-
-          def wheel_kind(path: pathlib.Path):
-              name = path.name.replace("-", "_")
-              if name.startswith(("sgl_kernel_", "sglang_kernel_")):
-                  return "sgl-kernel"
-              if name.startswith(("sglang_router_", "sgl_model_gateway_")):
-                  return "sgl-model-gateway"
-              if name.startswith("sglang_"):
-                  return "sglang"
-              return None
-
-          components = sorted(
-              kind
-              for kind in {wheel_kind(path) for path in wheel_paths}
-              if kind is not None
-          )
+          wheels = sorted(str(path.relative_to(staging_dir)) for path in wheel_dir.glob("*.whl"))
           manifest = {
               "repository": os.environ.get("GITHUB_REPOSITORY", ""),
               "run_id": os.environ.get("GITHUB_RUN_ID", ""),
               "commit_sha": os.environ.get("WHEEL_COMMIT_SHA", ""),
               "torch_version": os.environ.get("TORCH_VERSION", ""),
               "local_version": os.environ.get("LOCAL_VER", ""),
-              "components": components,
-              "gateway_built": "sgl-model-gateway" in components,
               "wheels": wheels,
           }
           (staging_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

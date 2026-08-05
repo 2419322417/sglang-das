@@ -28,11 +28,6 @@ on:
         required: false
         type: boolean
         default: false
-      require_gateway_wheel:
-        description: "Require the sgl-model-gateway wheel when wheel mode is enabled"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -182,7 +177,6 @@ jobs:
       HCU_WHEEL_STAGING_ROOT: /ci_public/sglang-das/hcu-wheel-staging
       HCU_WHEEL_STAGING_CONTAINER_ROOT: /hcu-wheel-staging
       CHECKOUT_REF: ${{ inputs.ref || github.sha }}
-      GATEWAY_WHEEL_REQUIRED: ${{ inputs.require_gateway_wheel || false }}
     steps:
       - name: Checkout code
         env:
@@ -251,7 +245,7 @@ jobs:
               name = path.name.replace("-", "_")
               if name.startswith(("sgl_kernel_", "sglang_kernel_")):
                   return "sgl-kernel"
-              if name.startswith(("sglang_router_", "sgl_model_gateway_")):
+              if name.startswith("sgl_model_gateway_"):
                   return "sgl-model-gateway"
               if name.startswith("sglang_"):
                   return "sglang"
