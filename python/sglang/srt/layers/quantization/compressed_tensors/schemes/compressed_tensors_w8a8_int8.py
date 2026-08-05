@@ -44,14 +44,6 @@ from sglang.srt.utils import W8a8GetCacheJSON
 W8A8_TRITONJSON = W8a8GetCacheJSON()
 
 
-def _use_kme_hipblaslt(device: torch.device) -> bool:
-    if device.type != "cuda":
-        return False
-    device_props = torch.cuda.get_device_properties(device)
-    gcn_arch = getattr(device_props, "gcnArchName", "").split(":")[0]
-    return gcn_arch == "gfx928"
-
-
 class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
 
     def __init__(
@@ -125,9 +117,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
     def process_weights_after_loading(self, layer) -> None:
         n = layer.weight.shape[0]
         k = layer.weight.shape[1]
-        use_kme_hipblaslt = self.w8a8_strategy == 3 and _use_kme_hipblaslt(
-            layer.weight.device
-        )
 
         if self.w8a8_strategy == 1:
             if [n, k] not in W8A8_TRITONJSON.weight_shapes:
@@ -167,15 +156,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
             else:
                 raise ValueError(f"Unknown quantization strategy {self.strategy}")
 
-            if use_kme_hipblaslt:
-                # gfx928 KME swapped TN: col-major [K,N], stride (1,K).
-                packed_weight = torch.empty_strided(
-                    (k, n), (1, k), device=w.device, dtype=w.dtype
-                )
-                packed_weight.copy_(w.t().contiguous())
-            else:
-                # gfx936/gfx938 use legacy NT with contiguous [N,K].
-                packed_weight = w.contiguous()
+            # lightop hipblaslt path expects contiguous [N, K] + logical NT.
+            # gfx928 selects channelwise_kme inside ops.blaslt_scaled_mm.
+            packed_weight = w.contiguous()
             layer.weight = Parameter(packed_weight, requires_grad=False)
 
             W8A8_TRITONJSON.gen_model_json()
@@ -204,12 +187,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
 
             if not self.input_symmetric:
                 # AZP adjustment is the reduction over K, normalized to [1,N].
-                if use_kme_hipblaslt:
-                    azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
-                else:
-                    azp_adj = layer.weight.sum(
-                        dim=1, keepdim=False, dtype=torch.int32
-                    ).unsqueeze(0)
+                azp_adj = layer.weight.sum(
+                    dim=1, keepdim=False, dtype=torch.int32
+                ).unsqueeze(0)
                 if self.is_static_input_scheme:
                     azp_adj = layer.input_zero_point * azp_adj
                 layer.azp_adj = Parameter(azp_adj, requires_grad=False)
