@@ -39,6 +39,7 @@ from sglang.srt.disaggregation.base.conn import (
     KVArgs,
     KVPoll,
     KVTransferMetric,
+    StateType,
 )
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.distributed import get_pp_group, get_world_group
@@ -827,17 +828,9 @@ class CommonKVManager(BaseKVManager):
             if len(dst_kv_ptrs) == kv_layout_len:
                 sliced_dst = (
                     list(dst_kv_ptrs[c4_off_s:c4_off_e])
+                    + list(dst_kv_ptrs[c4_full + c4_off_s : c4_full + c4_off_e])
                     + list(
-                        dst_kv_ptrs[
-                            c4_full + c4_off_s : c4_full + c4_off_e
-                        ]
-                    )
-                    + list(
-                        dst_kv_ptrs[
-                            2 * c4_full
-                            + c128_off_s : 2 * c4_full
-                            + c128_off_e
-                        ]
+                        dst_kv_ptrs[2 * c4_full + c128_off_s : 2 * c4_full + c128_off_e]
                     )
                 )
                 return src_kv_ptrs, sliced_dst
@@ -858,9 +851,7 @@ class CommonKVManager(BaseKVManager):
                 f"layers (e.g. nextn) that the SWA pool does not cover."
             )
 
-            c_non_zero_s = sum(
-                1 for r in mla_ratios[:start_layer] if r != 0
-            )
+            c_non_zero_s = sum(1 for r in mla_ratios[:start_layer] if r != 0)
             c_non_zero_e = sum(1 for r in mla_ratios[:end_layer] if r != 0)
             compress_section_start = swa_L
             indexer_section_start = swa_L + c4_full + c128_full
@@ -1533,9 +1524,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         bootstrap_rooms = data["bootstrap_rooms"]
         async with self.lock:
             aborted_rooms = [
-                int(room)
-                for room in bootstrap_rooms
-                if int(room) in self.aborted_rooms
+                int(room) for room in bootstrap_rooms if int(room) in self.aborted_rooms
             ]
         return web.json_response({"aborted_rooms": aborted_rooms}, status=200)
 

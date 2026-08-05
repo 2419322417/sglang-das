@@ -478,9 +478,7 @@ class DSV4PoolConfigurator(MemoryPoolConfigurator):
     def _get_decode_pre_alloc_size(max_running_requests: int) -> int:
         pre_alloc_size = envs.SGLANG_DISAGGREGATION_NUM_PRE_ALLOCATE_REQS.get()
         return (
-            max_running_requests * 2
-            if max_running_requests <= 32
-            else pre_alloc_size
+            max_running_requests * 2 if max_running_requests <= 32 else pre_alloc_size
         )
 
     def _get_num_req_slots(self, max_running_requests: int) -> int:

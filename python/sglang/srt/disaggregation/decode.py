@@ -52,7 +52,6 @@ from sglang.srt.disaggregation.utils import (
     get_kv_class,
     is_dsv4_c128_online_enabled,
     is_mla_backend,
-    poll_and_all_reduce,
     poll_and_all_reduce_by_rid,
     poll_and_all_reduce_with_staging,
     poll_and_all_reduce_with_staging_by_rid,
@@ -669,9 +668,7 @@ class DecodePreallocQueue:
                 continue
             # Keep polling after the initial handshake. An asynchronous failure
             # must override the cached waiting_for_input state.
-            local_status_by_rid[decode_req.req.rid] = int(
-                decode_req.kv_receiver.poll()
-            )
+            local_status_by_rid[decode_req.req.rid] = int(decode_req.kv_receiver.poll())
         if rids_to_check is None:
             status_by_rid = all_reduce_status_by_rid(
                 local_status_by_rid, self.gloo_group

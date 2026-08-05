@@ -130,9 +130,7 @@ def all_reduce_status_by_rid(
     dist.all_reduce(status_tensor, op=dist.ReduceOp.MIN, group=gloo_group)
 
     reduced_statuses = status_tensor.tolist()
-    return {
-        rid: reduced_statuses[index] for index, rid in enumerate(canonical_rids)
-    }
+    return {rid: reduced_statuses[index] for index, rid in enumerate(canonical_rids)}
 
 
 def poll_and_all_reduce_by_rid(
@@ -743,9 +741,8 @@ def setup_state_kv_args(
             append_state_component(
                 kv_args, StateType.SWA, data_ptrs, data_lens, item_lens
             )
-            if (
-                is_dsv4_request_scoped_c128_state_enabled()
-                and hasattr(token_to_kv_pool, "get_c128_state_buf_infos")
+            if is_dsv4_request_scoped_c128_state_enabled() and hasattr(
+                token_to_kv_pool, "get_c128_state_buf_infos"
             ):
                 c128_ptrs, c128_lens, c128_item_lens = (
                     token_to_kv_pool.get_c128_state_buf_infos()

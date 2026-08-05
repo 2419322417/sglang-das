@@ -621,9 +621,7 @@ class MooncakeKVManager(CommonKVManager):
         # Decode pp size should be equal to prefill pp size or 1
         if self.is_mla_backend:
             src_kv_ptrs, dst_kv_ptrs, layers_current_pp_stage = (
-                self.get_mla_kv_ptrs_with_pp(
-                    src_data_ptrs, dst_data_ptrs, state_type
-                )
+                self.get_mla_kv_ptrs_with_pp(src_data_ptrs, dst_data_ptrs, state_type)
             )
             layers_params = [
                 (
@@ -1672,9 +1670,8 @@ class MooncakeKVManager(CommonKVManager):
                         and len(dst_indices_local) == 0
                     ):
                         continue
-                    if (
-                        st == StateType.C128_STATE
-                        and len(src_indices) != len(dst_indices_local)
+                    if st == StateType.C128_STATE and len(src_indices) != len(
+                        dst_indices_local
                     ):
                         raise RuntimeError(
                             "C128_STATE state index length mismatch: "
@@ -2222,11 +2219,7 @@ class MooncakeKVManager(CommonKVManager):
             self.update_status(bootstrap_room, KVPoll.Failed)
             detected_rooms.append(bootstrap_room)
 
-        if (
-            detected_rooms
-            and self.attn_tp_rank == 0
-            and self.attn_cp_rank == 0
-        ):
+        if detected_rooms and self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
             logger.info(
                 "Marked decode prealloc rooms as failed after prefill abort: %s",
                 detected_rooms,

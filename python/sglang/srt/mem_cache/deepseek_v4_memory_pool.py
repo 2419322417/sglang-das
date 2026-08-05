@@ -216,14 +216,14 @@ class DeepSeekV4SingleKVPool(KVCache):
         valid_mask: Optional[torch.Tensor] = None,
     ) -> None:
         assert self.is_bf16_attention_kv_cache
-        assert cache_k.shape[-1] == self.logical_kv_dim, (
-            f"expected cache_k last dim {self.logical_kv_dim}, got {cache_k.shape}"
-        )
+        assert (
+            cache_k.shape[-1] == self.logical_kv_dim
+        ), f"expected cache_k last dim {self.logical_kv_dim}, got {cache_k.shape}"
         values = cache_k.to(torch.bfloat16).contiguous().view(-1, self.logical_kv_dim)
         n_values = values.shape[0]
-        assert loc.numel() == n_values, (
-            f"expected loc to match cache_k rows, got {loc.numel()=} {n_values=}"
-        )
+        assert (
+            loc.numel() == n_values
+        ), f"expected loc to match cache_k rows, got {loc.numel()=} {n_values=}"
         if n_values == 0:
             return
         kv_buffer = self.kv_buffer[layer_id].view(-1, self.logical_kv_dim)
@@ -685,9 +685,7 @@ class DeepSeekV4TokenToKVPool(BaseSWAKVPool):
             assert state.ndim == 2, f"expected 2D buffer, got {state.ndim}D"
             data_ptrs.append(state.data_ptr())
             data_lens.append(state.nbytes)
-            item_lens.append(
-                state[0].nbytes if ONLINE_C128 else state[0].nbytes * 128
-            )
+            item_lens.append(state[0].nbytes if ONLINE_C128 else state[0].nbytes * 128)
         return data_ptrs, data_lens, item_lens
 
     def _init_paged_compress_states(self, enable_memory_saver: bool):

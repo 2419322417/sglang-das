@@ -982,9 +982,7 @@ class SchedulerDisaggregationPrefillMixin:
                 # The matching batch result owns final resource cleanup.
                 self.chunked_req = None
             else:
-                maybe_cache_unfinished_req(
-                    chunked_req, self.tree_cache, chunked=True
-                )
+                maybe_cache_unfinished_req(chunked_req, self.tree_cache, chunked=True)
 
             if abort_pending or chunked_req.req_pool_idx is None:
                 self.running_batch.batch_is_full = False
@@ -1026,9 +1024,7 @@ class SchedulerDisaggregationPrefillMixin:
             req.disagg_kv_sender.abort()
         if req.req_pool_idx is not None:
             release_kv_cache(req, self.tree_cache)
-        release_req_to_metadata_buffer(
-            req, self.req_to_metadata_buffer_idx_allocator
-        )
+        release_req_to_metadata_buffer(req, self.req_to_metadata_buffer_idx_allocator)
         req._prefill_abort_cleanup_done = True
         self.stream_output([req], req.return_logprob, None)
         return True
