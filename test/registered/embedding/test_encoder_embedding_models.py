@@ -29,7 +29,7 @@ from sglang.test.test_utils import CustomTestCase, get_similarities, is_in_ci
 # python -m unittest test_encoder_embedding_models.TestEncoderEmbeddingModels.test_prefill_logits
 
 
-register_cuda_ci(est_time=270, suite="stage-b-test-1-gpu-small")
+register_cuda_ci(est_time=270, stage="stage-b", runner_config="1-gpu-small")
 
 # HCU_CSV_CI_UNVERIFIED: Registered from sglang.csv CI coverage; not re-tested in this framework pass.
 register_hcu_ci(

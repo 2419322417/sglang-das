@@ -34,7 +34,7 @@ from sglang.test.test_utils import (
 
 # FlashAttention3 integration tests (requires SM 90+ / H100)
 # Multiple test classes: FA3, FA3+MLA, FA3+SpecDecode variants
-register_cuda_ci(est_time=300, suite="stage-b-test-1-gpu-large")
+register_cuda_ci(est_time=300, stage="stage-b", runner_config="1-gpu-large")
 
 # HCU_CSV_CI_UNVERIFIED: Registered from sglang.csv CI coverage; not re-tested in this framework pass.
 register_hcu_ci(

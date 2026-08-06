@@ -30,7 +30,7 @@ from sglang.test.test_utils import (
 )
 
 # Local attention with FA3 (requires SM 90+ / H100, tp=4)
-register_cuda_ci(est_time=200, suite="stage-c-test-4-gpu-h100")
+register_cuda_ci(est_time=200, stage="stage-c", runner_config="4-gpu-h100")
 
 
 # HCU_CSV_CI_UNVERIFIED: Registered from sglang.csv CI coverage; not re-tested in this framework pass.
@@ -40,6 +40,7 @@ register_hcu_ci(
     nightly=True,
     disabled="HCU CSV CI placeholder: local attention multi-device path needs BW1100 validation before enabling.",
 )
+
 
 @unittest.skipIf(get_device_sm() < 90, "Test requires CUDA SM 90 or higher")
 class TestFlashAttention3LocalAttn(CustomTestCase):

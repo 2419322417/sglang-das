@@ -19,7 +19,7 @@ from sglang.test.ci.ci_register import register_cuda_ci, register_hcu_ci
 from sglang.test.kits.eval_accuracy_kit import GSM8KMixin
 from sglang.test.server_fixtures.default_fixture import DefaultServerBase
 
-register_cuda_ci(est_time=132, suite="stage-b-test-2-gpu-large")
+register_cuda_ci(est_time=132, stage="stage-b", runner_config="2-gpu-large")
 
 
 # HCU_CSV_CI_UNVERIFIED: Registered from sglang.csv CI coverage; not re-tested in this framework pass.
@@ -29,6 +29,7 @@ register_hcu_ci(
     nightly=False,
     disabled="HCU CSV CI placeholder: NVIDIA Nemotron model path needs HCU-compatible local mapping before enabling.",
 )
+
 
 class TestNvidiaNemotronNanoV2BF16(GSM8KMixin, DefaultServerBase):
     model = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"

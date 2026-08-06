@@ -16,7 +16,11 @@ import unittest
 from types import SimpleNamespace
 
 from sglang.srt.utils import is_hip, kill_process_tree
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_hcu_ci
+from sglang.test.ci.ci_register import (
+    register_amd_ci,
+    register_cuda_ci,
+    register_hcu_ci,
+)
 from sglang.test.run_eval import run_eval
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_ACCURACY_TEST_FP8,
@@ -28,7 +32,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=250, suite="stage-b-test-1-gpu-large")
+register_cuda_ci(est_time=250, stage="stage-b", runner_config="1-gpu-large")
 register_amd_ci(est_time=600, suite="stage-b-test-1-gpu-small-amd")
 
 
@@ -38,6 +42,7 @@ register_hcu_ci(
     suite="stage-b-test-1-gpu-small-hcu",
     disabled="HCU PR baseline deferred: quantization path needs BW1100 numeric/backend validation before required CI.",
 )
+
 
 class TestEvalFP8Accuracy(CustomTestCase):
     @classmethod

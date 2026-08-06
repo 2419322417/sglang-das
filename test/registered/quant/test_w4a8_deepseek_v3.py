@@ -33,7 +33,7 @@ from sglang.test.test_utils import (
     write_github_step_summary,
 )
 
-register_cuda_ci(est_time=520, suite="stage-c-test-8-gpu-h20")
+register_cuda_ci(est_time=520, stage="stage-c", runner_config="8-gpu-h20")
 
 
 # HCU_CSV_CI_UNVERIFIED: Registered from sglang.csv CI coverage; not re-tested in this framework pass.
@@ -43,6 +43,7 @@ register_hcu_ci(
     nightly=True,
     disabled="HCU CSV CI placeholder: W4A8 DeepSeek-V3 quant path needs BW1100 large-model validation before enabling.",
 )
+
 
 class TestDeepseekV3W4afp8(CustomTestCase):
     @classmethod
