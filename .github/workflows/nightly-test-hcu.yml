@@ -580,6 +580,7 @@ jobs:
           - name: accuracy-text-0
             group: nightly-hcu-accuracy-text
             suite: nightly-hcu-accuracy-text
+            network_mode: bridge
             nightly: "true"
             part: 0
             parts: 2
@@ -590,6 +591,7 @@ jobs:
           - name: accuracy-text-1
             group: nightly-hcu-accuracy-text
             suite: nightly-hcu-accuracy-text
+            network_mode: bridge
             nightly: "true"
             part: 1
             parts: 2
