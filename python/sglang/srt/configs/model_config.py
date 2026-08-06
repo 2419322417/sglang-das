@@ -229,16 +229,6 @@ def get_num_indexer_layers(config) -> int:
     return getattr(config, "num_indexer_layers", 0)
 
 
-def is_mtp_index_share_enabled(hf_config) -> bool:
-    return getattr(hf_config, "index_share_for_mtp_iteration", False)
-
-
-def get_mtp_index_share_topk(hf_config) -> int:
-    if not is_mtp_index_share_enabled(hf_config):
-        return 0
-    return get_nsa_index_topk(hf_config)
-
-
 class ModelConfig:
     def __init__(
         self,
@@ -337,7 +327,6 @@ class ModelConfig:
 
         # Config draft model
         self._config_draft_model()
-        self._resolve_eagle3_draft_quantization()
 
         # DSV4 expert layout: env (default True = mxfp4) applies only to V4.
         # Other FP8 MoE models (for example DeepSeek V3.2) must keep the normal
@@ -660,35 +649,6 @@ class ModelConfig:
         if is_draft_model and self.hf_config.architectures[0] == "HYV3ForCausalLM":
             self.hf_config.architectures[0] = "HYV3ForCausalLMNextN"
             self.hf_config.num_nextn_predict_layers = 1
-
-    def _resolve_eagle3_draft_quantization(self):
-        """Keep BF16 Eagle3 checkpoints out of serialized-only INT8 loaders.
-
-        The speculative draft quantization defaults to the target model's
-        quantization.  MiniMax-M2.5's Eagle3 head is a BF16 checkpoint without
-        INT8 weights or scales, so inheriting ``w8a8_int8`` would allocate INT8
-        draft layers and load the BF16 checkpoint into them.  Preserve the
-        checkpoint dtype unless the draft config explicitly carries
-        quantization metadata.
-        """
-        if not self.is_draft_model or self.quantization != "w8a8_int8":
-            return
-
-        architectures = getattr(self.hf_config, "architectures", None) or []
-        if not architectures or architectures[0] != "LlamaForCausalLMEagle3":
-            return
-
-        has_quantization_metadata = bool(
-            getattr(self.hf_config, "quantization_config", None)
-            or getattr(self.hf_config, "compression_config", None)
-        )
-        if not has_quantization_metadata:
-            logger.warning(
-                "The Eagle3 draft checkpoint has no quantization metadata; "
-                "ignoring inherited w8a8_int8 quantization and loading the "
-                "draft model in its checkpoint dtype."
-            )
-            self.quantization = None
 
     def _derive_hybrid_model(self):
         # Use self.context_len after it has been initialized to prevent using context_len which may be None.
@@ -1367,7 +1327,6 @@ class ModelConfig:
             "auto-round",
             "auto-round-int8",
             "quark_int4fp8_moe",
-            "slimquant_w4a8",
             "slimquant_w4a8_marlin",
             "w8a8_int8",
             "slimquant_marlin",
@@ -1396,7 +1355,6 @@ class ModelConfig:
             "petit_nvfp4",
             "quark",
             "modelslim",
-            "slimquant_w4a8",
             "slimquant_w4a8_marlin",
             "slimquant_marlin",
             "humming",

@@ -206,12 +206,10 @@ from sglang.srt.utils import (
     BumpAllocator,
     LazyValue,
     add_prefix,
-    cpu_has_amx_support,
     get_bool_env_var,
     get_int_env_var,
     is_hcu,
     is_non_idle_and_non_empty,
-    is_npu,
     log_info_on_rank0,
     make_layers,
     use_intel_amx_backend,
@@ -234,7 +232,7 @@ _use_fused_rmsnorm_rope = get_bool_env_var("SGLANG_USE_FUSED_RMSNORM_ROPE")
 _use_fused_rms_quant = get_bool_env_var("SGLANG_USE_FUSED_RMS_QUANT")
 _rms_quant_path = get_int_env_var("SGLANG_USE_RMS_QUANT_PATH")
 if _use_fused_rmsnorm_rope:
-    from lightop.attention import fused_rms_norm_rope_contiguous
+    from lightop import fused_rms_norm_rope_contiguous
 
     fused_rms_norm_rope_contiguous = torch._dynamo.disable(
         fused_rms_norm_rope_contiguous

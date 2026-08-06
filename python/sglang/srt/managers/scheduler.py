@@ -2940,48 +2940,6 @@ class Scheduler(
 
         return NextBatchPlan(batch_to_run=ret, running_batch=running_batch)
 
-    def _abort_request(
-        self, req: Req, adder, reason: str, extra_suffix: str = ""
-    ) -> None:
-        """Abort a request that exceeds KV cache pool capacity.
-
-        Args:
-            req: The request to abort.
-            adder: The PrefillAdder with pool budget state.
-            reason: Human-readable reason describing why the request can't fit.
-            extra_suffix: Optional extra info appended after the standard message.
-        """
-        pool_info = f"rem_total_tokens={adder.rem_total_tokens}"
-        if getattr(adder, "is_hybrid_swa", False):
-            pool_info += f", rem_swa_tokens={adder.rem_swa_tokens}"
-        error_msg = (
-            f"{reason} ({pool_info}). "
-            f"Aborting to unblock the scheduler. "
-            f"Consider increasing --mem-fraction-static or "
-            f"--swa-full-tokens-ratio."
-        )
-        if extra_suffix:
-            error_msg += f" {extra_suffix}"
-        logger.error(error_msg)
-        self.send_to_tokenizer.send_output(
-            AbortReq(
-                finished_reason={
-                    "type": "abort",
-                    "status_code": HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                    "message": error_msg,
-                },
-                rid=req.rid,
-            ),
-            req,
-        )
-        # Release resources associated with the aborted request that would
-        # normally be cleaned up by abort_request(). The request was never
-        # scheduled, so there is no KV cache to release, but grammar
-        # compilation futures and hicache prefetch events must be cancelled.
-        if self.enable_hicache_storage:
-            self.tree_cache.release_aborted_request(req.rid)
-        self.grammar_manager.abort_requests(AbortReq(rid=req.rid))
-
     def _get_new_batch_prefill_raw(
         self,
         prefill_delayer_single_pass: Optional[PrefillDelayerSinglePassExecutor],
@@ -3070,24 +3028,6 @@ class Scheduler(
             self.chunked_req.init_next_round_input()
             self.chunked_req = adder.add_chunked_req(self.chunked_req)
 
-        # If the chunked_req cannot be scheduled for its next chunk and
-        # there is no other path to free pool space (no running requests,
-        # no waiting queue), abort it to break the deadlock.
-        if (
-            self.chunked_req is not None
-            and not self._chunked_req_scheduled_last_iter
-            and len(self.running_batch.reqs) == 0
-        ):
-            release_kv_cache(self.chunked_req, self.tree_cache)
-            self._abort_request(
-                self.chunked_req,
-                adder,
-                f"Chunked prefill request {self.chunked_req.rid} cannot be "
-                f"scheduled for its next chunk and no other requests "
-                f"can free pool space",
-            )
-            self.chunked_req = None
-
         if self.enable_lora:
             running_loras = {
                 req.lora_id for req in running_batch.reqs if not req.finished()
@@ -3105,9 +3045,7 @@ class Scheduler(
         if mamba_allocator is not None:
             mamba_allocator.alloc_group_begin(len(self.waiting_queue))
         # Get requests from the waiting queue to a new prefill batch
-        # Iterate over a copy so we can safely remove too-large requests
-        # from the original waiting_queue during iteration.
-        for req in list(self.waiting_queue):
+        for req in self.waiting_queue:
             if self.enable_lora and not self._can_schedule_lora_req(req, running_loras):
                 continue
 
@@ -3320,17 +3258,8 @@ class Scheduler(
                 if mamba_allocator is not None
                 else None
             )
-            allow_retract_all = (
-                kv_full_retract_flag
-                and self.server_args.disaggregation_mode == "decode"
-                and self.pp_size > 1
-                and any(
-                    running_batch is not batch and not running_batch.is_empty()
-                    for running_batch in getattr(self, "running_mbs", ())
-                )
-            )
             retracted_reqs, new_token_ratio, reqs_to_abort = batch.retract_decode(
-                self.server_args, allow_retract_all=allow_retract_all
+                self.server_args
             )
             new_available_tokens = self.token_to_kv_pool_allocator.available_size()
             new_token_gained = new_available_tokens - old_available_tokens

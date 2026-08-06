@@ -58,9 +58,8 @@ from sglang.srt.disaggregation.utils import (
     get_kv_class,
     is_dsv4_c128_online_enabled,
     is_mla_backend,
-    poll_and_all_reduce_by_rid,
+    poll_and_all_reduce,
     poll_and_all_reduce_with_staging,
-    poll_and_all_reduce_with_staging_by_rid,
     prepare_abort,
     setup_state_kv_args,
 )
@@ -742,20 +741,7 @@ class DecodePreallocQueue(DecodeHiCachePreallocMixin):
         for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
             if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
                 continue
-            # Keep polling after the initial handshake. An asynchronous failure
-            # must override the cached waiting_for_input state.
-            local_status_by_rid[decode_req.req.rid] = int(decode_req.kv_receiver.poll())
-        if rids_to_check is None:
-            status_by_rid = all_reduce_status_by_rid(
-                local_status_by_rid, self.gloo_group
-            )
-        else:
-            status_by_rid = local_status_by_rid
 
-        for decode_req in self.queue:
-            poll = status_by_rid.get(decode_req.req.rid, int(KVPoll.Bootstrapping))
-            if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
-                continue
             if poll == KVPoll.Bootstrapping:
                 pass
             elif poll == KVPoll.WaitingForInput:
@@ -1851,8 +1837,7 @@ class DecodeTransferQueue(DecodeHiCacheTransferMixin):
 
         transferred_reqs = []
         indices_to_remove = set()
-        for i, decode_req in enumerate(self.queue):
-            poll = status_by_rid.get(decode_req.req.rid, int(KVPoll.Bootstrapping))
+        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
             if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
                 continue
 

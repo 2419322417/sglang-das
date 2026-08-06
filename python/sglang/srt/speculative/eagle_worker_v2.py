@@ -117,7 +117,6 @@ from sglang.srt.utils.common import (
     get_available_gpu_memory,
     is_cpu,
     is_cuda,
-    is_hcu,
     is_hip,
     is_musa,
     is_npu,
@@ -129,7 +128,6 @@ from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 _is_cpu = is_cpu()
 _is_npu = is_npu()
 _is_cuda = is_cuda()
-_is_hcu = is_hcu()
 _is_musa = is_musa()
 _is_hip = is_hip()
 _is_xpu = is_xpu()
@@ -404,17 +402,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         self.draft_extend_attn_backend = (
             draft_backend_factory.create_draft_extend_backend()
         )
-        actual_draft_attn_backend = self.draft_runner.attn_backend
-        if _is_nsa_attn_backend(actual_draft_attn_backend) and not _is_nsa_attn_backend(
-            self.draft_extend_attn_backend
-        ):
-            log_info_on_rank0(
-                logger,
-                "Using the draft model's NSA attention backend for draft extend "
-                "CUDA graph capture/replay "
-                f"(factory_backend={type(self.draft_extend_attn_backend).__name__}).",
-            )
-            self.draft_extend_attn_backend = actual_draft_attn_backend
 
         self.draft_runner.draft_attn_backend = self.draft_attn_backend
         if self.draft_extend_attn_backend is not None:
@@ -436,8 +423,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             "xpu": EAGLEDraftCudaGraphRunner,
             "npu": EAGLEDraftNpuGraphRunner,
             "cuda": EAGLEDraftCudaGraphRunner,
-            "dcu": EAGLEDraftCudaGraphRunner,
-            "hcu": EAGLEDraftCudaGraphRunner,
             "musa": EAGLEDraftCudaGraphRunner,
         }
         # Capture draft
@@ -468,8 +453,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             "xpu": EAGLEDraftExtendCudaGraphRunner,
             "npu": EAGLEDraftExtendNpuGraphRunner,
             "cuda": EAGLEDraftExtendCudaGraphRunner,
-            "dcu": EAGLEDraftExtendCudaGraphRunner,
-            "hcu": EAGLEDraftExtendCudaGraphRunner,
             "musa": EAGLEDraftCudaGraphRunner,
         }
         supports_hip_aiter_draft_extend_graph = False
@@ -543,18 +526,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 f"elapsed={time.perf_counter() - tic:.2f} s, "
                 f"mem usage={(before_mem - after_mem):.2f} GB, "
                 f"avail mem={after_mem:.2f} GB.",
-            )
-        elif self.draft_extend_attn_backend:
-            log_info_on_rank0(
-                logger,
-                "Skip draft extend cuda graph capture because the attention backend "
-                f"is not supported yet: {type(self.draft_extend_attn_backend).__name__}. "
-                f"device={self.device}, target_device={self.target_worker.device}, "
-                f"is_cuda={_is_cuda}, is_hcu={_is_hcu}, is_musa={_is_musa}, "
-                f"is_npu={_is_npu}, is_hip={_is_hip}, "
-                f"is_cuda_draft_extend_device={is_cuda_draft_extend_device}, "
-                f"is_nsa_draft_extend_backend={is_nsa_draft_extend_backend}, "
-                f"speculative_attention_mode={self.server_args.speculative_attention_mode}.",
             )
 
     def draft(self, batch: ScheduleBatch):
@@ -820,56 +791,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
     def draft_extend(self):
         pass
 
-    def _capture_mtp_topk_indices(
-        self,
-        next_draft_input: EagleDraftInput,
-        forward_batch: ForwardBatch,
-        *,
-        source: Optional[torch.Tensor] = None,
-        select_index: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Store one NSA index-share seed row per request.
-
-        Eager draft-extend writes to ``forward_batch.topk_indices``; CUDA graph
-        draft-extend exposes the same tensor on its logits output. Prefill uses
-        the last row of each ragged extend range, while decode-v2 selects the
-        last accepted row already used for logits and hidden states.
-        """
-        next_draft_input.mtp_topk_indices = None
-        if not is_mtp_index_share_enabled(self.draft_runner.model_config.hf_config):
-            return
-
-        topk_indices = forward_batch.topk_indices if source is None else source
-        if topk_indices is None or forward_batch.forward_mode.is_idle():
-            return
-
-        if select_index is None:
-            if forward_batch.extend_seq_lens is None:
-                return
-            select_index = (
-                torch.cumsum(
-                    forward_batch.extend_seq_lens.to(
-                        device=topk_indices.device, dtype=torch.int64
-                    ),
-                    dim=0,
-                )
-                - 1
-            )
-        else:
-            select_index = select_index.to(
-                device=topk_indices.device, dtype=torch.int64
-            )
-
-        if select_index.numel() == 0:
-            return
-
-        # The source is produced by the same draft-extend forward as logits and
-        # hidden states, so it follows the same row contract. Avoid max().item()
-        # here because select_index is a device tensor in decode-v2.
-        next_draft_input.mtp_topk_indices = topk_indices.index_select(
-            0, select_index
-        ).clone()
-
     def _draft_extend_for_prefill(
         self,
         batch: ScheduleBatch,
@@ -920,8 +841,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         forward_batch.return_hidden_states_before_norm = (
             self.need_hidden_states_before_norm
         )
-        if is_mtp_index_share_enabled(self.draft_runner.model_config.hf_config):
-            forward_batch.capture_mtp_topk_indices = True
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
 
@@ -1039,9 +958,6 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             torch.get_device_module(self.device).current_stream().wait_stream(
                 self.plan_stream
             )
-
-        if is_mtp_index_share_enabled(self.draft_runner.model_config.hf_config):
-            forward_batch.capture_mtp_topk_indices = True
 
         # Run draft extend batch in the main compute stream
         can_cuda_graph = (

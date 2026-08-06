@@ -169,10 +169,6 @@ class EagleDraftInput(SpecInput):
     # chain); the worker copies it here post-extend for next iter's draft.
     bonus_tokens: torch.Tensor = None
 
-    # NSA MTP index share: per-request seed captured by draft-extend and reused
-    # by the first draft step.
-    mtp_topk_indices: Optional[torch.Tensor] = None
-
     # shape: (b + 1,)
     kv_indptr: torch.Tensor = None
     kv_indices: torch.Tensor = None
@@ -255,11 +251,6 @@ class EagleDraftInput(SpecInput):
                 self.dsa_topk_indices = self.dsa_topk_indices[new_indices]
 
     def merge_batch(self, spec_info: "EagleDraftInput"):
-        if (self.future_indices is None) != (spec_info.future_indices is None):
-            raise ValueError(
-                "Cannot merge resolved and unresolved Eagle draft inputs; "
-                "their MTP seed rows do not share a common lifecycle"
-            )
         if self.future_indices is not None:
             assert spec_info.future_indices is not None
             self.future_indices = torch.cat(
