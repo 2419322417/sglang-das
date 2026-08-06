@@ -192,29 +192,11 @@ class MLPSyncBatchInfo:
             if torch.distributed.get_rank(group=group) == 0 and (
                 over_budget or epoch % 1024 == 0
             ):
-                epoch = int(step_tp0[0, 2].item())
-                log_every = 1024
-                over_budget = int(step_tp0[:, 9].max().item())
-                if over_budget or (log_every > 0 and epoch % log_every == 0):
 
-                    def _minmax(col: int) -> tuple[int, int]:
-                        return (
-                            int(step_tp0[:, col].min().item()),
-                            int(step_tp0[:, col].max().item()),
-                        )
-
-                    logger.debug(
-                        "DP Decode StepInfo epoch=%s transfer=%s prealloc=%s "
-                        "retracted=%s running=%s paused=%s pd_ms=%s "
-                        "over_budget=%s",
-                        epoch,
-                        _minmax(3),
-                        _minmax(4),
-                        _minmax(5),
-                        _minmax(6),
-                        _minmax(7),
-                        _minmax(8),
-                        _minmax(9),
+                def _minmax(col: int) -> tuple[int, int]:
+                    return (
+                        int(step_tp0[:, col].min().item()),
+                        int(step_tp0[:, col].max().item()),
                     )
 
                 logger.info(
@@ -269,7 +251,6 @@ def prepare_mlp_sync_batch_raw(
     require_mlp_tp_gather: bool,
     disable_overlap_schedule: bool,
     offload_tags: set[str],
-    mtp_index_share_for_topk1: bool = False,
     scheduler_step_info: Optional[list[int]] = None,
     sync_group_override: Optional[torch.distributed.ProcessGroup] = None,
 ):
@@ -431,11 +412,6 @@ class SchedulerDPAttnAdapter:
             require_mlp_tp_gather=require_mlp_tp_gather(self.server_args),
             disable_overlap_schedule=self.server_args.disable_overlap_schedule,
             offload_tags=self.offload_tags,
-            mtp_index_share_for_topk1=(
-                self.spec_algorithm.is_eagle()
-                and self.server_args.speculative_eagle_topk == 1
-                and is_mtp_index_share_enabled(self.model_config.hf_config)
-            ),
             scheduler_step_info=scheduler_step_info,
             sync_group_override=sync_group,
         )

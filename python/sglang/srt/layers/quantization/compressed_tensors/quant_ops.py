@@ -138,9 +138,14 @@ def _blaslt_scaled_mm_kme(
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
     out_dtype: torch.dtype,
     bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """Logical O[M,N]=X[M,K]@W[K,N] via hipblaslt_gemm_channelwise_kme TN."""
+    import lmslimquant
 
     if out_dtype is not torch.bfloat16:
         raise ValueError(
@@ -173,14 +178,6 @@ def _blaslt_scaled_mm_kme(
         beta,
         bias_arg,
     )
-    if use_kme:
-        _, out = quant_ops.hipblaslt_w8a8_channelwise_gemm_kme(
-            a, b, scale_a, scale_b, m, n, k, "NT", out_dtype, bias
-        )
-    else:
-        _, out = quant_ops.hipblaslt_w8a8_gemm(
-            a, b, scale_a, scale_b, m, n, k, "NT", out_dtype
-        )
     if out.dim() == 3:
         out = out.squeeze(0)
     return out
