@@ -19,9 +19,9 @@ import torch
 import torch.nn.functional as F
 import triton.language as tl
 from lightop import gemm_ops as quant_tools
+from lightop._lmslim_native.layers.fused_moe import w4a8 as w4a8_triton
 from lightop._lmslim_native.vllm_compat.fused_moe_cache import get_moe_cache
 from lightop.quant import per_token_quant_int8
-from lightop._lmslim_native.layers.fused_moe import w4a8 as w4a8_triton
 from torch.nn.parameter import Parameter
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size

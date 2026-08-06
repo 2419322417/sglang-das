@@ -393,9 +393,7 @@ def _overall_status(
     if collected.regressions:
         return "red", "存在未达标", "存在模型精度低于阈值"
     has_infra_issue = bool(
-        collected.missing_models
-        or collected.diagnostics
-        or collected.failed_partitions
+        collected.missing_models or collected.diagnostics or collected.failed_partitions
     )
     if has_infra_issue:
         return "orange", "结果不完整", "存在精度分片或结果异常"
