@@ -2589,7 +2589,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return retracted_reqs
 
     def retract_decode(
-        self, server_args: ServerArgs
+        self, server_args: ServerArgs, allow_retract_all: bool = False
     ) -> Tuple[List[Req], float, List[Req]]:
         """Retract the decoding requests when there is not enough memory."""
         sorted_indices = self._get_decode_retraction_order(
@@ -2605,7 +2605,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         while first_iter or (
             not self.check_decode_mem(selected_indices=sorted_indices)
         ):
-            if len(sorted_indices) == 1:
+            if len(sorted_indices) == 1 and not allow_retract_all:
                 # Always keep at least one request
                 break
 

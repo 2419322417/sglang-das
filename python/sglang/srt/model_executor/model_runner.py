@@ -172,6 +172,9 @@ from sglang.srt.model_executor.forward_context import (
 )
 from sglang.srt.model_executor.graph_shared_output import GraphSharedOutput
 from sglang.srt.model_executor.hook_manager import register_forward_hooks
+from sglang.srt.model_executor.input_buffers import (
+    get_pp_proxy_hidden_states_shape,
+)
 from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
     ModelRunnerKVCacheMixin,
 )
@@ -1031,6 +1034,18 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         ]
         self.model_config.swa_attention_layer_ids = swa_attention_layer_ids
         self.model_config.full_attention_layer_ids = full_attention_layer_ids
+
+    def get_pp_proxy_topk_size(self) -> Optional[int]:
+        """Return the top-k width a non-first PP stage must receive, if any."""
+        hf_config = self.model_config.hf_text_config
+        if (
+            self.pp_size <= 1
+            or self.pp_rank == 0
+            or not is_deepseek_nsa(hf_config)
+            or not nsa_layer_skips_topk(hf_config, self.start_layer)
+        ):
+            return None
+        return getattr(hf_config, "index_topk", None)
 
     def init_routed_experts_capturer(self):
         if self.is_draft_worker:

@@ -53,7 +53,7 @@ use crate::{
         worker_spec::{WorkerConfigRequest, WorkerUpdateRequest},
     },
     routers::{
-        conversations,
+        anthropic, conversations,
         mesh::{
             get_app_config, get_cluster_status, get_global_rate_limit, get_global_rate_limit_stats,
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
@@ -190,6 +190,26 @@ async fn v1_chat_completions(
         .router
         .route_chat(Some(&headers), &body, Some(&body.model))
         .await
+}
+
+async fn v1_messages(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let converted = match anthropic::convert_request(body) {
+        Ok(converted) => converted,
+        Err(error) => return error.into_response(),
+    };
+    let response = state
+        .router
+        .route_chat(
+            Some(&headers),
+            &converted.chat,
+            Some(&converted.response_config.model),
+        )
+        .await;
+    anthropic::transform_response(response, converted.response_config).await
 }
 
 async fn v1_completions(
@@ -544,6 +564,7 @@ pub fn build_app(
     let protected_routes = Router::new()
         .route("/generate", post(generate))
         .route("/v1/chat/completions", post(v1_chat_completions))
+        .route("/v1/messages", post(v1_messages))
         .route("/v1/completions", post(v1_completions))
         .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))

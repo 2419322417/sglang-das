@@ -65,6 +65,35 @@ def get_dsv4_c128_state_indices(
     return np.array([page], dtype=np.int32)
 
 
+def is_dsv4_c128_online_enabled() -> bool:
+    """Return whether C128 uses the online compression algorithm."""
+    return envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
+
+
+def is_dsv4_request_scoped_c128_state_enabled() -> bool:
+    """Return whether PR #28612 request-scoped C128 state is enabled."""
+    return envs.SGLANG_DSV4_REQUEST_SCOPED_C128_STATE.get()
+
+
+def get_dsv4_c128_state_indices(
+    req_pool_idx: int,
+    seq_len: int,
+    *,
+    online: bool,
+    ring_size: int,
+) -> np.ndarray:
+    """Return the PD transfer row/page indices for DSV4 C128 state."""
+    if seq_len == 0 or seq_len % 128 == 0:
+        return np.empty((0,), dtype=np.int32)
+    if online:
+        return np.array([int(req_pool_idx)], dtype=np.int32)
+
+    assert ring_size % 128 == 0, f"C128 ring_size must be 128-aligned, got {ring_size}"
+    pages_per_req = ring_size // 128
+    page = int(req_pool_idx) * pages_per_req + ((seq_len - 1) % ring_size) // 128
+    return np.array([page], dtype=np.int32)
+
+
 class DisaggregationMode(Enum):
     NULL = "null"
     PREFILL = "prefill"
@@ -148,6 +177,71 @@ def poll_and_all_reduce(
     return tensor_to_reduce.tolist()
 
 
+def all_reduce_status_by_rid(
+    status_by_rid,
+    gloo_group: dist.ProcessGroup,
+    missing_status=None,
+):
+    """Synchronize poll statuses by request id instead of local queue shape."""
+    from sglang.srt.disaggregation.base import KVPoll
+
+    if missing_status is None:
+        missing_status = int(KVPoll.Bootstrapping)
+
+    group_size = dist.get_world_size(gloo_group)
+    if group_size <= 1:
+        return dict(status_by_rid)
+
+    group_rank = dist.get_rank(gloo_group)
+    group_src = dist.get_global_rank(gloo_group, 0)
+    canonical_rids = [sorted(status_by_rid) if group_rank == 0 else None]
+    dist.broadcast_object_list(
+        canonical_rids,
+        src=group_src,
+        group=gloo_group,
+    )
+    canonical_rids = canonical_rids[0]
+
+    # The sentinel keeps the collective sequence identical for an empty queue.
+    local_statuses = [
+        status_by_rid.get(rid, missing_status) for rid in canonical_rids
+    ] or [missing_status]
+    status_tensor = torch.tensor(local_statuses, dtype=torch.uint8, device="cpu")
+    dist.all_reduce(status_tensor, op=dist.ReduceOp.MIN, group=gloo_group)
+
+    reduced_statuses = status_tensor.tolist()
+    return {rid: reduced_statuses[index] for index, rid in enumerate(canonical_rids)}
+
+
+def poll_and_all_reduce_by_rid(
+    rid_and_pollers,
+    gloo_group: dist.ProcessGroup,
+    missing_status=None,
+):
+    from sglang.srt.disaggregation.base import KVPoll
+
+    status_by_rid = {}
+    for rid, poller in rid_and_pollers:
+        if FAILURE_PROB > 0 and random.random() < FAILURE_PROB:
+            status_by_rid[rid] = int(KVPoll.Failed)
+        else:
+            status_by_rid[rid] = int(poller.poll())
+
+    return all_reduce_status_by_rid(status_by_rid, gloo_group, missing_status)
+
+
+def poll_and_all_reduce_by_rid_attn_cp_tp_group(
+    rid_and_pollers,
+    attn_cp_cpu_group: dist.ProcessGroup,
+    attn_tp_cpu_group: dist.ProcessGroup,
+    missing_status=None,
+):
+    status_by_rid = poll_and_all_reduce_by_rid(
+        rid_and_pollers, attn_tp_cpu_group, missing_status
+    )
+    return all_reduce_status_by_rid(status_by_rid, attn_cp_cpu_group, missing_status)
+
+
 def poll_and_all_reduce_attn_cp_tp_group(
     pollers,
     attn_cp_cpu_group: dist.ProcessGroup,
@@ -197,6 +291,33 @@ def poll_and_all_reduce_with_staging(
     poll_tensor = torch.tensor(raw_polls, dtype=torch.uint8, device="cpu")
     dist.all_reduce(poll_tensor, op=dist.ReduceOp.MIN, group=gloo_group)
     return poll_tensor.tolist()
+
+
+def poll_and_all_reduce_with_staging_by_rid(
+    decode_reqs,
+    staging_handler,
+    gloo_group: dist.ProcessGroup,
+    missing_status=None,
+):
+    """Staging-aware polling with request-id aligned synchronization."""
+    from sglang.srt.disaggregation.base import KVPoll
+
+    status_by_rid = {}
+    for decode_req in decode_reqs:
+        if decode_req.kv_receiver.require_staging and not staging_handler.is_done(
+            decode_req
+        ):
+            staging_handler.advance_scatter(decode_req)
+
+        poll = int(decode_req.kv_receiver.poll())
+        if poll == int(KVPoll.Success):
+            if decode_req.kv_receiver.require_staging and not staging_handler.is_done(
+                decode_req
+            ):
+                poll = int(KVPoll.Transferring)
+        status_by_rid[decode_req.req.rid] = poll
+
+    return all_reduce_status_by_rid(status_by_rid, gloo_group, missing_status)
 
 
 #########################

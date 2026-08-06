@@ -48,7 +48,7 @@ from sglang.srt.disaggregation.utils import (
     is_aborted,
     is_dsv4_c128_online_enabled,
     is_mla_backend,
-    poll_and_all_reduce_attn_cp_tp_group,
+    poll_and_all_reduce_by_rid_attn_cp_tp_group,
     prepare_abort,
     setup_state_kv_args,
 )
@@ -374,11 +374,18 @@ class PrefillBootstrapQueue:
         failed_reqs = []
         indices_to_remove = set()
 
-        if len(self.queue) == 0:
-            if return_failed_reqs is False:
-                return []
-            else:
-                return [], []
+        if rids_to_check is None:
+            status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+                [(req.rid, req.disagg_kv_sender) for req in self.queue],
+                self.scheduler.attn_cp_cpu_group,
+                self.scheduler.attn_tp_cpu_group,
+            )
+        else:
+            status_by_rid = {
+                req.rid: int(req.disagg_kv_sender.poll())
+                for req in self.queue
+                if req.rid in rids_to_check
+            }
 
         polls = poll_and_all_reduce_attn_cp_tp_group(
             [req.disagg_kv_sender for req in self.queue],
@@ -647,6 +654,10 @@ class SchedulerDisaggregationPrefillMixin:
             result.indexer_topk_output.finalize()
             result.indexer_topk_output = None
 
+        # In overlap mode batch is a lightweight snapshot; the producer-owned
+        # next_draft_input preserves the exact row order of this forward.
+        draft_input = _get_disagg_prefill_draft_input(batch, result)
+
         logprob_pt = 0
         # Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         next_token_ids = result.next_token_ids.tolist()
@@ -679,11 +690,17 @@ class SchedulerDisaggregationPrefillMixin:
                 req.output_ids.append(next_token_id)
                 maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
-                if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
-                    req.output_topk_p = batch.spec_info.topk_p[i]
-                    req.output_topk_index = batch.spec_info.topk_index[i]
+                if self.spec_algorithm.is_eagle() and draft_input is not None:
+                    req.output_topk_p = draft_input.topk_p[i]
+                    req.output_topk_index = draft_input.topk_index[i]
                     req.hidden_states_tensor = (
-                        batch.spec_info.hidden_states[i].cpu().clone()
+                        draft_input.hidden_states[i].cpu().clone()
+                    )
+                    mtp_indices = getattr(draft_input, "mtp_topk_indices", None)
+                    req.mtp_topk_indices_tensor = (
+                        mtp_indices[i].cpu().clone()
+                        if mtp_indices is not None
+                        else None
                     )
                     dsa_topk_indices = batch.spec_info.dsa_topk_indices
                     if dsa_topk_indices is not None:
@@ -792,16 +809,23 @@ class SchedulerDisaggregationPrefillMixin:
         Poll the requests in the middle of transfer. If done, return the request.
         rids_to_check: For PP, on rank > 0, check the rids from the previous rank has consensus with the current rank.
         """
-        if len(self.disagg_prefill_inflight_queue) == 0:
-            return []
-
         done_reqs = []
 
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
-            self.attn_cp_cpu_group,
-            self.attn_tp_cpu_group,
-        )
+        if rids_to_check is None:
+            status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+                [
+                    (req.rid, req.disagg_kv_sender)
+                    for req in self.disagg_prefill_inflight_queue
+                ],
+                self.attn_cp_cpu_group,
+                self.attn_tp_cpu_group,
+            )
+        else:
+            status_by_rid = {
+                req.rid: int(req.disagg_kv_sender.poll())
+                for req in self.disagg_prefill_inflight_queue
+                if req.rid in rids_to_check
+            }
 
         undone_reqs: List[Req] = []
         # Check .poll() for the reqs in disagg_prefill_inflight_queue. If Success, respond to the client and remove it from the queue
@@ -921,15 +945,19 @@ class SchedulerDisaggregationPrefillMixin:
         """
         Used by PP, get the transferred rids but **do not pop**
         """
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.disagg_prefill_inflight_queue],
+        status_by_rid = poll_and_all_reduce_by_rid_attn_cp_tp_group(
+            [
+                (req.rid, req.disagg_kv_sender)
+                for req in self.disagg_prefill_inflight_queue
+            ],
             self.attn_cp_cpu_group,
             self.attn_tp_cpu_group,
         )
 
         transferred_rids: List[str] = []
 
-        for req, poll in zip(self.disagg_prefill_inflight_queue, polls):
+        for req in self.disagg_prefill_inflight_queue:
+            poll = status_by_rid.get(req.rid, int(KVPoll.Bootstrapping))
             if poll == KVPoll.Success or poll == KVPoll.Failed:
                 transferred_rids.append(req.rid)
 
@@ -1052,6 +1080,26 @@ class SchedulerDisaggregationPrefillMixin:
             return
         assert cached_end % self.token_to_kv_pool_allocator.page_size == 0
         self.send_kv_chunk(req, last_chunk=False, end_idx=cached_end)
+
+    def _finish_aborted_prefill_req(self: Scheduler, req: Req) -> bool:
+        if getattr(req, "_prefill_abort_cleanup_done", False):
+            return True
+
+        if req.to_finish is not None:
+            req.finished_reason = req.to_finish
+            req.to_finish = None
+
+        if not isinstance(req.finished_reason, FINISH_ABORT):
+            return False
+
+        if hasattr(req.disagg_kv_sender, "abort"):
+            req.disagg_kv_sender.abort()
+        if req.req_pool_idx is not None:
+            release_kv_cache(req, self.tree_cache)
+        release_req_to_metadata_buffer(req, self.req_to_metadata_buffer_idx_allocator)
+        req._prefill_abort_cleanup_done = True
+        self.stream_output([req], req.return_logprob, None)
+        return True
 
     def send_kv_chunk(
         self: Scheduler,

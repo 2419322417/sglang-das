@@ -689,6 +689,15 @@ class DeepseekV4AttnBackend(
         seq_lens: torch.Tensor,
         out_cache_loc: torch.Tensor,
     ) -> Union[DSV4Metadata, DSV4RawDecodeMetadata]:
+        if self.mtp_enabled and req_pool_indices.shape[0] != out_cache_loc.shape[0]:
+            # MTP generates speculative_num_steps tokens per request.
+            # req_pool_indices and seq_lens are per-request (one per request),
+            # out_cache_loc is per-token (speculative_num_steps per request).
+            # Expand to per-token so downstream metadata is consistent.
+            steps = out_cache_loc.shape[0] // req_pool_indices.shape[0]
+            req_pool_indices = req_pool_indices.repeat_interleave(steps)
+            seq_lens = seq_lens.repeat_interleave(steps)
+
         assert (
             req_pool_indices.shape[0] == seq_lens.shape[0] == out_cache_loc.shape[0]
         ), f"{req_pool_indices.shape=} {seq_lens.shape=} {out_cache_loc.shape=}"
@@ -1590,7 +1599,7 @@ class DeepseekV4AttnBackend(
             )
         else:
             if _is_hcu and _use_dpskv4_lightop_quant_k_cache:
-                from lightop import op
+                from lightop import kvcache as op
 
                 if hasattr(op, "quantize_nope_fp8_rope_bf16_pack_store"):
                     self.token_to_kv_pool.set_swa_key_buffer_radix_lightop_fused(

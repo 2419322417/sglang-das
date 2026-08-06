@@ -327,7 +327,7 @@ class ResultCollectionTest(unittest.TestCase):
             self.assertIn(key, collected.missing_models)
             self.assertGreaterEqual(len(collected.diagnostics), 2)
 
-    def test_failed_matrix_with_complete_scores_is_orange(self):
+    def test_failed_non_accuracy_matrix_with_complete_scores_is_green(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _write_complete_results(root)
@@ -341,10 +341,39 @@ class ResultCollectionTest(unittest.TestCase):
                 workflow_result="failure",
                 run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/3",
             )
+            self.assertEqual(card["header"]["template"], "green")
+            self.assertIn(
+                f"本次 {len(notify.EXPECTED_MODELS)} 个模型全部达到阈值",
+                card["body"]["elements"][0]["text"]["content"],
+            )
+
+    def test_failed_accuracy_partition_with_complete_scores_is_orange(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_complete_results(root)
+            _write_partition_status(
+                root / "artifact-0",
+                "accuracy-text-0",
+                "failure",
+            )
+            collected = notify.collect_results(root)
+            card = notify.build_card(
+                collected,
+                branch="0713-hcu-sglang-test",
+                target_ref="0713-hcu-sglang-test",
+                commit_sha="c" * 40,
+                image="example/sglang:test",
+                workflow_result="success",
+                run_url="https://github.com/HYGON-AI/sglang-das/actions/runs/3",
+            )
             self.assertEqual(card["header"]["template"], "orange")
             self.assertIn(
                 "本次结果状态不完整",
                 card["body"]["elements"][0]["text"]["content"],
+            )
+            self.assertEqual(
+                collected.failed_partitions,
+                {"accuracy-text-0": "failure"},
             )
 
     def test_preview_is_clearly_labeled_and_uses_all_models(self):
@@ -421,6 +450,27 @@ class ResultCollectionTest(unittest.TestCase):
 
 
 class SharedResultPublisherTest(unittest.TestCase):
+    def test_existing_shared_directory_does_not_require_ownership(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_root = Path(tmpdir)
+            with mock.patch.object(
+                Path,
+                "chmod",
+                side_effect=PermissionError("not the directory owner"),
+            ) as chmod:
+                publisher._ensure_directory(shared_root)
+            chmod.assert_not_called()
+
+    def test_existing_shared_directory_must_be_writable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_root = Path(tmpdir)
+            with mock.patch.object(publisher.os, "access", return_value=False):
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "shared result directory is not writable",
+                ):
+                    publisher._ensure_directory(shared_root)
+
     def test_publishes_partition_atomically_with_group_permissions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

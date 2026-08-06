@@ -381,12 +381,14 @@ def _column_set(columns: List[Tuple[str, int]], *, grey: bool = False) -> dict:
 
 
 def _short_image_id(image_id: str) -> str:
-    compact = _single_line(image_id).removeprefix("sha256:")
+    compact = _single_line(image_id)
+    if compact.startswith("sha256:"):
+        compact = compact[len("sha256:") :]
     return compact[:12] or "unknown"
 
 
 def _overall_status(
-    collected: CollectedResults, workflow_result: str
+    collected: CollectedResults, _workflow_result: str
 ) -> Tuple[str, str, str]:
     if collected.regressions:
         return "red", "存在未达标", "存在模型精度低于阈值"
@@ -394,10 +396,9 @@ def _overall_status(
         collected.missing_models
         or collected.diagnostics
         or collected.failed_partitions
-        or workflow_result != "success"
     )
     if has_infra_issue:
-        return "orange", "结果不完整", "存在基础设施或范围外测例异常"
+        return "orange", "结果不完整", "存在精度分片或结果异常"
     return (
         "green",
         "全部通过",

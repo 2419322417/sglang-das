@@ -461,6 +461,29 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For NSA/DSA topk_indices reuse across forward calls (e.g., EAGLE draft)
     topk_indices: Optional[torch.Tensor] = None
     reuse_mtp_topk_indices: Optional[bool] = False
+    # When True, the NextN forward publishes freshly computed logical NSA
+    # top-k indices so draft-extend can seed the next MTP iteration.
+    capture_mtp_topk_indices: bool = False
+
+    # Records the batch shape used when attention metadata was pre-planned.
+    # Eager DP padding may grow ForwardBatch later; NSA still needs the
+    # original row count to distinguish logical query rows from padding rows.
+    forward_metadata_ready: bool = False
+    forward_metadata_planned_bs: Optional[int] = None
+    forward_metadata_planned_num_tokens: Optional[int] = None
+    forward_metadata_replan_equivalent: bool = False
+
+    def uses_logical_mtp_topk_indices(self) -> bool:
+        """Whether MTP top-k must stay allocator-independent."""
+        return bool(self.capture_mtp_topk_indices or self.reuse_mtp_topk_indices)
+
+    def mark_forward_metadata_ready(self, replan_equivalent: bool = False):
+        self.forward_metadata_ready = True
+        self.forward_metadata_planned_bs = self.batch_size
+        self.forward_metadata_planned_num_tokens = (
+            self.input_ids.shape[0] if self.input_ids is not None else 0
+        )
+        self.forward_metadata_replan_equivalent = replan_equivalent
 
     # For extend
     extend_num_tokens: Optional[int] = None
@@ -1517,6 +1540,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 )
                 spec_info.num_accept_tokens = self._pad_tensor_to_size(
                     spec_info.num_accept_tokens, bs
+                )
+            if getattr(spec_info, "mtp_topk_indices", None) is not None:
+                spec_info.mtp_topk_indices = self._pad_tensor_to_size(
+                    spec_info.mtp_topk_indices, bs, value=-1
                 )
             spec_info.hidden_states = self._pad_tensor_to_size(
                 spec_info.hidden_states, num_tokens

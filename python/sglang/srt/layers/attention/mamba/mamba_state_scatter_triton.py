@@ -133,6 +133,7 @@ def _fused_mamba_state_scatter_with_mask_kernel(
     dst_indices_raw_ptr,  # [total_requests] - state_indices_tensor
     step_indices_raw_ptr,  # [total_requests] - last_correct_step_indices or mamba_steps_to_track
     elem_per_entry: tl.constexpr,
+    num_blocks: tl.constexpr,
     src_layer_stride,
     src_req_stride,
     src_step_stride,
@@ -152,11 +153,12 @@ def _fused_mamba_state_scatter_with_mask_kernel(
     3. If valid, performing the scatter:
        dst[l, dst_indices_raw[pid_req], :] = src[l, pid_req, step_indices_raw[pid_req], :]
 
-    Grid: (total_requests, num_layers, ceil(elem_per_entry / BLOCK_SIZE))
+    Grid: (total_requests * num_blocks, num_layers)
     """
-    pid_req = tl.program_id(0)
+    pid = tl.program_id(0)
     pid_layer = tl.program_id(1).to(tl.int64)
-    pid_block = tl.program_id(2).to(tl.int64)
+    pid_req = pid // num_blocks
+    pid_block = pid - pid_req * num_blocks
 
     # Load step index to check validity (step >= 0 means valid)
     step_idx = tl.load(step_indices_raw_ptr + pid_req).to(tl.int64)
@@ -280,8 +282,9 @@ def fused_mamba_state_scatter_with_mask(
     # Block size for copying elements
     BLOCK_SIZE = 1024
 
-    # Grid over all requests - invalid ones will early-exit in the kernel
-    grid = (total_requests, num_layers, triton.cdiv(elem_per_entry, BLOCK_SIZE))
+    # Flatten request and block IDs because Triton limits grid's third axis.
+    num_blocks = triton.cdiv(elem_per_entry, BLOCK_SIZE)
+    grid = (total_requests * num_blocks, num_layers)
 
     _fused_mamba_state_scatter_with_mask_kernel[grid](
         src,
@@ -289,6 +292,7 @@ def fused_mamba_state_scatter_with_mask(
         dst_indices_raw,
         step_indices_raw,
         elem_per_entry,
+        num_blocks,
         src_layer_stride,
         src_req_stride,
         src_step_stride,

@@ -1403,6 +1403,16 @@ class MooncakeKVManager(CommonKVManager):
         prefill_aux_index: int,
         dst_aux_ptrs: list[int],
     ):
+        prefill_aux_ptrs = self.kv_args.aux_data_ptrs
+        if len(dst_aux_ptrs) != len(prefill_aux_ptrs):
+            raise RuntimeError(
+                "Prefill/decode aux buffer count mismatch: "
+                f"prefill has {len(prefill_aux_ptrs)} slots, "
+                f"decode sent {len(dst_aux_ptrs)}. "
+                "Check that P/D use the same model and speculative-decoding "
+                "configuration."
+            )
+
         # TODO(shangming): Fix me when nvlink_transport of Mooncake is bug-free
         if (
             self.enable_custom_mem_pool and self.custom_mem_pool_type == "NVLINK"
@@ -1410,7 +1420,6 @@ class MooncakeKVManager(CommonKVManager):
             return self.send_aux_tcp(req, prefill_aux_index, dst_aux_ptrs)
 
         transfer_blocks = []
-        prefill_aux_ptrs = self.kv_args.aux_data_ptrs
         prefill_aux_item_lens = self.kv_args.aux_item_lens
 
         for i, dst_aux_ptr in enumerate(dst_aux_ptrs):
@@ -1476,6 +1485,28 @@ class MooncakeKVManager(CommonKVManager):
         aux_index = int(msg[3].decode("ascii"))
         data_length = struct.unpack(">I", msg[4])[0]
         data = msg[5]
+
+        aux_buffer_count = len(self.kv_args.aux_data_ptrs)
+        if not 0 <= buffer_index < aux_buffer_count:
+            raise RuntimeError(
+                "AUX_DATA buffer index out of range: "
+                f"received {buffer_index}, decode has {aux_buffer_count} aux slots. "
+                "This usually indicates a P/D aux buffer count mismatch."
+            )
+
+        item_len = self.kv_args.aux_item_lens[buffer_index]
+        item_count = self.kv_args.aux_data_lens[buffer_index] // item_len
+        if not 0 <= aux_index < item_count:
+            raise RuntimeError(
+                "AUX_DATA item index out of range: "
+                f"received {aux_index}, buffer {buffer_index} has {item_count} items"
+            )
+        if data_length != item_len:
+            raise RuntimeError(
+                "AUX_DATA item length mismatch: "
+                f"received {data_length}, expected {item_len} "
+                f"for buffer {buffer_index}"
+            )
 
         if len(data) != data_length:
             logger.error(f"AUX_DATA length mismatch for bootstrap_room {room}")
@@ -2244,6 +2275,55 @@ class MooncakeKVManager(CommonKVManager):
 
         threading.Thread(target=bootstrap_thread).start()
 
+    def _sync_aborted_rooms(self, bootstrap_addr, session):
+        current_rooms = self.addr_to_rooms_tracker[bootstrap_addr].copy()
+        active_rooms = []
+        for bootstrap_room in current_rooms:
+            if bootstrap_room in self.request_status:
+                active_rooms.append(bootstrap_room)
+            else:
+                self.addr_to_rooms_tracker[bootstrap_addr].discard(bootstrap_room)
+
+        if not active_rooms:
+            return
+
+        response = session.post(
+            f"http://{bootstrap_addr}/query_aborted_rooms",
+            json={"bootstrap_rooms": active_rooms},
+            timeout=(2, 3),
+            headers={"Connection": "keep-alive"},
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "Failed to query aborted rooms from %s: status=%s, body=%s",
+                bootstrap_addr,
+                response.status_code,
+                response.text,
+            )
+            return
+
+        aborted_rooms = response.json().get("aborted_rooms", [])
+        detected_rooms = []
+        for bootstrap_room in aborted_rooms:
+            bootstrap_room = int(bootstrap_room)
+            if (
+                bootstrap_room not in self.request_status
+                or self.request_status[bootstrap_room] == KVPoll.Failed
+            ):
+                continue
+            self.record_failure(
+                bootstrap_room,
+                "Prefill request was aborted before KV transfer.",
+            )
+            self.update_status(bootstrap_room, KVPoll.Failed)
+            detected_rooms.append(bootstrap_room)
+
+        if detected_rooms and self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
+            logger.info(
+                "Marked decode prealloc rooms as failed after prefill abort: %s",
+                detected_rooms,
+            )
+
     def start_decode_thread(self):
         def decode_thread():
             while True:
@@ -2605,7 +2685,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         packed_state_dim_per_tensor,
                         packed_staging_base_ptr,
                         staging_total_size_str,
-                    ]
+                    ],
                 )
 
     def send_metadata(
@@ -2652,7 +2732,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         ),
                         str(self.required_dst_info_num).encode("ascii"),
                         str(decode_prefix_len or 0).encode("ascii"),
-                    ]
+                    ],
                 )
         self.init_time = time.time()
 

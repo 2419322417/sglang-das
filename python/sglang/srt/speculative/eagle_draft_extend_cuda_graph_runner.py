@@ -127,6 +127,9 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
             else speculative_num_steps
         )
         self.topk = model_runner.server_args.speculative_eagle_topk
+        self.enable_mtp_index_share = is_mtp_index_share_enabled(
+            model_runner.model_config.hf_config
+        )
         self.draft_extend_attn_backend = (
             draft_extend_attn_backend or eagle_worker.draft_extend_attn_backend
         )
@@ -409,6 +412,8 @@ class EAGLEDraftExtendCudaGraphRunner(DecodeCudaGraphRunner):
             spec_info=spec_info,
             capture_hidden_mode=CaptureHiddenMode.LAST,
         )
+        if self.enable_mtp_index_share:
+            forward_batch.capture_mtp_topk_indices = True
 
         if self.buffers.dsa_seed_topk_capture is not None:
             spec_info.dsa_seed_topk_capture = self.buffers.dsa_seed_topk_capture[

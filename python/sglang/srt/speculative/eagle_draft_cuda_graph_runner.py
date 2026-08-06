@@ -67,6 +67,7 @@ class EagleDraftInputBuffers(ForwardInputBuffers):
     topk_index: torch.Tensor
     draft_probs: Optional[torch.Tensor]
     hidden_states: Optional[torch.Tensor]
+    mtp_topk_indices: Optional[torch.Tensor]
     global_num_tokens_gpu: Optional[torch.Tensor]
     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor]
     dsa_seed_topk: Optional[torch.Tensor] = None
@@ -204,6 +205,11 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
                 if _hidden_size is not None
                 else None
             )
+            mtp_topk_indices = (
+                torch.zeros((self.max_bs, self.mtp_index_share_topk), dtype=torch.int32)
+                if self.enable_mtp_index_share
+                else None
+            )
 
             self.temperatures = torch.ones((self.max_bs, 1), dtype=torch.float)
 
@@ -254,6 +260,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             topk_index=topk_index,
             draft_probs=draft_probs,
             hidden_states=hidden_states,
+            mtp_topk_indices=mtp_topk_indices,
             global_num_tokens_gpu=global_num_tokens_gpu,
             global_num_tokens_for_logprob_gpu=global_num_tokens_for_logprob_gpu,
             dsa_seed_topk=dsa_seed_topk,
@@ -306,6 +313,22 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
 
         if self.require_mlp_sync:
             is_bs_supported = is_bs_supported and forward_batch.can_run_dp_cuda_graph
+
+        if self.enable_mtp_index_share and (
+            not forward_batch.forward_mode.is_idle() or self.topk != 1
+        ):
+            mtp_topk_indices = getattr(
+                forward_batch.spec_info, "mtp_topk_indices", None
+            )
+            has_usable_seed = (
+                mtp_topk_indices is not None
+                and mtp_topk_indices.dtype == torch.int32
+                and tuple(mtp_topk_indices.shape)
+                == (forward_batch.batch_size, self.mtp_index_share_topk)
+            )
+            if not has_usable_seed:
+                # Never replay a graph with an absent or misaligned seed.
+                is_bs_supported = False
 
         return is_bs_supported
 
@@ -382,6 +405,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             topk_index=topk_index,
             draft_probs=draft_probs,
             hidden_states=hidden_states,
+            mtp_topk_indices=mtp_topk_indices,
             capture_hidden_mode=capture_mode,
         )
         if self.buffers.dsa_seed_topk is not None:

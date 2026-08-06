@@ -11,7 +11,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -109,7 +109,25 @@ pub struct AuthConfig {
     pub api_key: Option<String>,
 }
 
-/// Middleware to validate Bearer token against configured API key
+fn api_key_matches(headers: &HeaderMap, expected_key: &str) -> bool {
+    let bearer_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let anthropic_key = headers
+        .get("x-api-key")
+        .and_then(|header| header.to_str().ok());
+    let expected_bytes = expected_key.as_bytes();
+
+    bearer_token.into_iter().chain(anthropic_key).any(|token| {
+        let token_bytes = token.as_bytes();
+        token_bytes.len() == expected_bytes.len()
+            && token_bytes.ct_eq(expected_bytes).unwrap_u8() == 1
+    })
+}
+
+/// Middleware to validate Bearer token or Anthropic x-api-key against the
+/// configured API key.
 /// Only active when router has an API key configured
 pub async fn auth_middleware(
     State(auth_config): State<AuthConfig>,
@@ -117,30 +135,8 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     if let Some(expected_key) = &auth_config.api_key {
-        // Extract Authorization header
-        let auth_header = request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok());
-
-        match auth_header {
-            Some(header_value) if header_value.starts_with("Bearer ") => {
-                let token = &header_value[7..]; // Skip "Bearer "
-                                                // Use constant-time comparison to prevent timing attacks
-                let token_bytes = token.as_bytes();
-                let expected_bytes = expected_key.as_bytes();
-
-                // Check if lengths match first (this is not constant-time but necessary)
-                if token_bytes.len() != expected_bytes.len() {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-
-                // Constant-time comparison of the actual values
-                if token_bytes.ct_eq(expected_bytes).unwrap_u8() != 1 {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-            }
-            _ => return Err(StatusCode::UNAUTHORIZED),
+        if !api_key_matches(request.headers(), expected_key) {
+            return Err(StatusCode::UNAUTHORIZED);
         }
     }
 
@@ -982,6 +978,25 @@ pub async fn wasm_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_api_key_matches_bearer_or_anthropic_header() {
+        let mut bearer_headers = HeaderMap::new();
+        bearer_headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+        assert!(api_key_matches(&bearer_headers, "secret"));
+
+        let mut anthropic_headers = HeaderMap::new();
+        anthropic_headers.insert("x-api-key", "secret".parse().unwrap());
+        assert!(api_key_matches(&anthropic_headers, "secret"));
+    }
+
+    #[test]
+    fn test_api_key_rejects_wrong_or_missing_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "wrong".parse().unwrap());
+        assert!(!api_key_matches(&headers, "secret"));
+        assert!(!api_key_matches(&HeaderMap::new(), "secret"));
+    }
 
     #[test]
     fn test_normalize_path_no_ids() {

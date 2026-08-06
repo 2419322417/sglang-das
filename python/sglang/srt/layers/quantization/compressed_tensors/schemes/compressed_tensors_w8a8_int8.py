@@ -10,6 +10,9 @@ from typing import Callable, Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationStrategy
+
+# from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 from torch.nn import Parameter
 
 from sglang.kernels.ops.quantization.int8_kernel import per_token_quant_int8
@@ -190,8 +193,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                 layer.input_zero_point = None
 
             if not self.input_symmetric:
-                # W is [K,N] col-major; AZP adj is sum over K -> [1,N]
-                azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+                # AZP adjustment is the reduction over K, normalized to [1,N].
+                azp_adj = layer.weight.sum(
+                    dim=1, keepdim=False, dtype=torch.int32
+                ).unsqueeze(0)
                 if self.is_static_input_scheme:
                     azp_adj = layer.input_zero_point * azp_adj
                 layer.azp_adj = Parameter(azp_adj, requires_grad=False)
