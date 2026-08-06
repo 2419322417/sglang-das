@@ -162,13 +162,15 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         else:
             # If checkpoint not offline quantized, quantize the weights with per-channel quantization.
-            if self.cutlass_fp8_supported:
-                # if cutlass supported, we use cutlass_scaled_mm
-                # which requires per-channel quantization on weight
+            if self.cutlass_fp8_supported or _is_hcu:
+                # CUTLASS and HCU DeepGEMM use per-channel weight scales and
+                # per-token activation scales. Keep online-quantized draft
+                # models on the same interface as serialized FP8 targets.
                 qweight, weight_scale = per_token_group_quant_fp8(
                     layer.weight, layer.weight.shape[-1]
                 )
-                weight_scale = weight_scale.t().contiguous()
+                if not _is_hcu:
+                    weight_scale = weight_scale.t().contiguous()
             else:
                 # if cutlass not supported, we fall back to use torch._scaled_mm
                 # which requires per tensor quantization on weight

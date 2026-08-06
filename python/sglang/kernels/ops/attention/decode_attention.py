@@ -22,6 +22,7 @@ It supports page size = 1.
 
 import logging
 
+import torch
 import triton
 import triton.language as tl
 
@@ -580,7 +581,11 @@ def _decode_grouped_att_m_fwd(
     Lv = v_buffer.shape[-1]
 
     # [TODO] work around shmem limit on MI3xx
-    if _is_hip and Lk >= 576:
+    is_fp8 = k_buffer.dtype in (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    )
+    if _is_hip and Lk >= 576 and not is_fp8:
         BLOCK = 16
 
     if Lk == 576:

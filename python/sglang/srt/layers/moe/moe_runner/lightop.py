@@ -32,7 +32,6 @@ from sglang.srt.layers.moe.moe_runner.base import (
 from sglang.srt.layers.moe.utils import MoeRunnerBackend, get_moe_a2a_backend
 from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors_moe_marlin import (
     get_w8a8_int8_marlin_weights,
-    weight8bit_nt_kpack2_marlin1,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +39,51 @@ if TYPE_CHECKING:
         StandardCombineInput,
         StandardDispatchOutput,
     )
+
+
+def weight8bit_nt_kpack2_marlin1(
+    weight, k_tile=16, k_tile1=4, n_tile=16, n_tile1=16  # [size_n, size_k// 2 ]
+):
+    assert weight.element_size() == 1, "weight 必须是 8 bit 类型"
+    if weight.dim() == 2:
+        size_n, size_k = weight.shape
+        assert (
+            size_n % k_tile == 0 and size_k % n_tile == 0
+        ), "k_tile / n_tile 必须能整除对应维度"
+
+        q = weight.reshape(
+            (
+                size_n // (n_tile * n_tile1),
+                n_tile1,
+                n_tile,
+                size_k // (k_tile * k_tile1),
+                k_tile1,
+                k_tile,
+            )
+        )
+        # q = q.permute((0, 2, 1, 3)).contiguous()
+        q = q.permute((0, 3, 1, 4, 2, 5)).contiguous()
+        # q = q.reshape((size_n // k_tile, size_k * k_tile))
+    elif weight.dim() == 3:
+        E, size_n, size_k = weight.shape
+        assert (
+            size_n % n_tile == 0 and size_k % k_tile == 0
+        ), "k_tile / n_tile 必须能整除对应维度"
+
+        q = weight.reshape(
+            (
+                E,
+                size_n // (n_tile * n_tile1),
+                n_tile1,
+                n_tile,
+                size_k // (k_tile * k_tile1),
+                k_tile1,
+                k_tile,
+            )
+        )
+        q = q.permute((0, 1, 4, 2, 5, 3, 6)).contiguous()
+        # q = q.reshape((E, size_n // k_tile, size_k * k_tile))
+    return q
 
 
 @dataclass

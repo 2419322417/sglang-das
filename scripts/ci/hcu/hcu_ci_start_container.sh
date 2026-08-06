@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright 2026 Hygon Information Technology Co., Ltd.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,10 +34,15 @@ set -euo pipefail
 #   HCU_MODEL_EXTRA_HOST_PATHS              Colon-separated host model roots to mount read-only
 #                                           at the same path inside the container.
 #   HCU_CI_NETWORK_MODE                     Docker network mode: host (default) or bridge.
+#   HCU_CI_SHM_SIZE                         Docker shared-memory size. Defaults to 32g.
+#   HCU_CI_ENABLE_RDMA                      Set to 1 to expose RDMA devices, lock memory,
+#                                           and add IPC_LOCK. Defaults to disabled.
 
 CUSTOM_IMAGE=""
 CONTAINER="${HCU_CI_CONTAINER:-${HCU_CI_CONTAINER_NAME:-ci_sglang}}"
 NETWORK_MODE="${HCU_CI_NETWORK_MODE:-host}"
+SHM_SIZE="${HCU_CI_SHM_SIZE:-32g}"
+ENABLE_RDMA="${HCU_CI_ENABLE_RDMA:-0}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -71,6 +76,8 @@ case "${NETWORK_MODE}" in
 esac
 
 echo "Using HCU image: ${IMAGE}"
+echo "Using HCU Docker network mode: ${NETWORK_MODE}"
+echo "Using HCU Docker shared-memory size: ${SHM_SIZE}"
 
 # Pull only if not already present locally, unless explicitly skipped.
 if [[ -z "${HCU_CI_SKIP_PULL:-}" ]] && ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
@@ -98,6 +105,26 @@ if [[ -n "${VISIBLE_DEVICES}" ]]; then
     VISIBLE_ENV_ARGS+=(-e "ROCR_VISIBLE_DEVICES=${VISIBLE_DEVICES}")
   fi
 fi
+
+RDMA_ARGS=()
+case "${ENABLE_RDMA}" in
+  1|true)
+    RDMA_ARGS+=(
+      --cap-add=IPC_LOCK
+      --ulimit memlock=-1:-1
+    )
+    if [[ -d /dev/infiniband ]]; then
+      RDMA_ARGS+=(-v /dev/infiniband:/dev/infiniband)
+    else
+      echo "Warning: HCU_CI_ENABLE_RDMA is set but /dev/infiniband is absent." >&2
+    fi
+    ;;
+  0|false|"") ;;
+  *)
+    echo "Error: HCU_CI_ENABLE_RDMA=${ENABLE_RDMA@Q}; expected 0, 1, false, or true." >&2
+    exit 1
+    ;;
+esac
 
 CACHE_HOST="${HCU_CACHE_HOST:-${HCU_CI_CACHE_HOST:-/home/runner/sgl-data}}"
 if [[ -d "${CACHE_HOST}" ]]; then
@@ -146,6 +173,7 @@ docker run -dt --user root --privileged \
   --network="${NETWORK_MODE}" \
   --ipc=host \
   ${DEVICE_FLAGS} \
+  "${RDMA_ARGS[@]}" \
   --ulimit nofile=65536:65536 \
   -v "${GITHUB_WORKSPACE:-$PWD}:/sglang-checkout" \
   -v /opt/hyhal:/opt/hyhal:ro \
@@ -154,7 +182,7 @@ docker run -dt --user root --privileged \
   ${WHEEL_STAGING_VOLUME} \
   "${EXTRA_MODEL_VOLUMES[@]}" \
   --group-add video \
-  --shm-size 32g \
+  --shm-size "${SHM_SIZE}" \
   --cap-add=SYS_PTRACE \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e HF_HOME=/sgl-data/hf-cache \

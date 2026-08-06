@@ -26,7 +26,14 @@ def _chmod_directory(path: Path) -> None:
 
 
 def _ensure_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True)
+    except FileExistsError:
+        if not path.is_dir():
+            raise NotADirectoryError(f"shared result path is not a directory: {path}")
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise PermissionError(f"shared result directory is not writable: {path}")
+        return
     _chmod_directory(path)
 
 

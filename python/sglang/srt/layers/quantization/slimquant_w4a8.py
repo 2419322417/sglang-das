@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
+import triton.language as tl
 from lightop import gemm_ops as quant_tools
+from lightop._lmslim_native.layers.fused_moe import w4a8 as w4a8_triton
+from lightop._lmslim_native.vllm_compat.fused_moe_cache import get_moe_cache
 from lightop.quant import per_token_quant_int8
 from torch.nn.parameter import Parameter
 
@@ -68,6 +72,105 @@ def baseline_scaled_mm(
     if bias is not None:
         output = output + bias
     return output.to(out_dtype)
+
+
+def fused_experts_impl_w4a8_triton(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    cache13: torch.Tensor,
+    *,
+    activation: str,
+    apply_router_weight_on_input: bool,
+    global_num_experts: int,
+    expert_map: Optional[torch.Tensor],
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    routed_scaling_factor: float,
+    shared_output: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Run SlimQuant W4A8 Triton GEMMs without whole-layer LightOp fusion."""
+    assert hidden_states.ndim == 2 and hidden_states.is_contiguous()
+    assert hidden_states.shape[1] == w1.shape[2] * 2
+    assert topk_weights.shape == topk_ids.shape
+
+    num_tokens = hidden_states.shape[0]
+    if num_tokens == 0:
+        return torch.empty_like(hidden_states)
+    top_k = topk_ids.shape[1]
+    n1 = w1.shape[1]
+    n2 = w2.shape[1]
+    chunk_size = min(int(os.getenv("LMSLIM_FUSED_MOE_CHUNK_SIZE", "32768")), num_tokens)
+    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    output = torch.empty_like(hidden_states)
+
+    for begin in range(0, num_tokens, chunk_size):
+        end = min(begin + chunk_size, num_tokens)
+        token_count = end - begin
+        current_x = hidden_states[begin:end]
+        current_ids = topk_ids[begin:end]
+        current_weights = topk_weights[begin:end]
+        cache1 = cache13[: token_count * top_k * n1].view(token_count, top_k, n1)
+        cache3 = cache13[: token_count * top_k * n2].view(token_count, top_k, n2)
+
+        config1, config2 = w4a8_triton.get_w8a8moe_json(
+            token_count, w1.shape[0], n1, n2, n1 // 2
+        )
+        sorted_ids, expert_ids, padded_count = w4a8_triton.moe_align_block_size(
+            current_ids, config1["BLOCK_SIZE_M"], global_num_experts, expert_map
+        )
+        qx, x_scale = per_token_quant_int8(current_x)
+        w4a8_triton.invoke_fused_moe_kernel_w4a8(
+            qx,
+            w1,
+            cache1,
+            x_scale,
+            w1_scale,
+            None,
+            current_weights,
+            sorted_ids,
+            expert_ids,
+            padded_count,
+            apply_router_weight_on_input,
+            top_k,
+            config1,
+            compute_type=compute_type,
+        )
+
+        gate, up = cache1.chunk(2, dim=-1)
+        if activation == "silu":
+            activated = F.silu(gate) * up
+        elif activation == "gelu":
+            activated = F.gelu(gate) * up
+        else:
+            raise ValueError(f"Unsupported FusedMoE activation: {activation}")
+        qactivated, activated_scale = per_token_quant_int8(
+            activated.reshape(token_count * top_k, n1 // 2)
+        )
+        w4a8_triton.invoke_fused_moe_kernel_w4a8(
+            qactivated,
+            w2,
+            cache3,
+            activated_scale,
+            w2_scale,
+            None,
+            current_weights,
+            sorted_ids,
+            expert_ids,
+            padded_count,
+            not apply_router_weight_on_input,
+            1,
+            config2,
+            compute_type=compute_type,
+        )
+        reduced = cache3.sum(dim=1).mul_(routed_scaling_factor)
+        if shared_output is not None:
+            reduced.add_(shared_output[begin:end])
+        output[begin:end].copy_(reduced)
+
+    return output
 
 
 class SlimQuantW4A8Int8Config(QuantizationConfig):
@@ -248,7 +351,7 @@ class SlimQuantW4A8Int8LinearMethod(LinearMethodBase):
             #    print("m:{},n:{},k:{}".format(m,n,k))
             #    print("config not found!")
 
-            return quant_ops.triton_scaled_mm(
+            output = quant_ops.triton_scaled_mm(
                 x_q,
                 layer.weight,
                 scale_a=x_scale,
@@ -257,6 +360,7 @@ class SlimQuantW4A8Int8LinearMethod(LinearMethodBase):
                 bias=bias,
                 best_config=best_config,
             )
+            return output
         elif self.w8a8_strategy == 2:
             return quant_ops.cutlass_scaled_mm(
                 x_q,
@@ -323,7 +427,7 @@ class SlimQuantW4A8Int8MoEMethod:
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
@@ -332,6 +436,7 @@ class SlimQuantW4A8Int8MoEMethod:
         )
 
         tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size = intermediate_size_per_partition
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -412,70 +517,80 @@ class SlimQuantW4A8Int8MoEMethod:
         self.moe_runner_config = moe_runner_config
         self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
-    def apply(
+    def _apply_triton(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        use_nn_moe: Optional[bool] = False,
-        routed_scaling_factor: Optional[float] = None,
-        use_fused_gate: Optional[bool] = False,
-        **_,
+        topk_output,
+        activation: str,
+        shared_output: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton import (
-            FusedMoE,
-        )
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+        from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
 
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `SlimQuantW4A8Int8MoEMethod` yet."
-            )
-        # Expert selection
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-            use_fused_gate=use_fused_gate,
+        topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
+        x, topk_weights = apply_topk_weights_cpu(
+            self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
         )
-
-        return fused_experts(
+        cache13 = get_moe_cache(
+            topk_ids.shape[1],
+            layer.w13_weight.shape[1],
+            layer.w2_weight.shape[1],
+            device=x.device,
+            dtype=x.dtype,
+        )
+        routed_scaling_factor = (
+            self.moe_runner_config.routed_scaling_factor
+            if self.moe_runner_config.routed_scaling_factor is not None
+            else 1.0
+        )
+        output = fused_experts_impl_w4a8_triton(
             x,
             layer.w13_weight,
             layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            use_int4_w4a8=True,
-            per_channel_quant=True,
+            topk_weights,
+            topk_ids,
+            cache13,
             activation=activation,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            w1_scale=(layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
-            use_nn_moe=use_nn_moe,
+            apply_router_weight_on_input=self.moe_runner_config.apply_router_weight_on_input,
+            global_num_experts=self.moe_runner_config.num_experts,
+            expert_map=getattr(layer, "expert_map", None),
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            routed_scaling_factor=routed_scaling_factor,
+            shared_output=shared_output,
+        )
+        return output
+
+    @torch._dynamo.disable()
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        dispatch_output,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
+    ):
+        from sglang.srt.layers.moe.token_dispatcher.standard import StandardCombineInput
+
+        output = self._apply_triton(
+            layer,
+            dispatch_output.hidden_states,
+            dispatch_output.topk_output,
+            layer.moe_runner_config.activation,
+            shared_output=None,
+        )
+        return StandardCombineInput(hidden_states=output)
+
+    @torch._dynamo.disable()
+    def apply_with_shared_output(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        activation: str = "silu",
+        shared_output: Optional[torch.Tensor] = None,
+        topk_output=None,
+        i_q: Optional[torch.Tensor] = None,
+        i_s: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self._apply_triton(
+            layer, x, topk_output, activation, shared_output=shared_output
         )

@@ -14,7 +14,11 @@
 
 import unittest
 
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci, register_hcu_ci
+from sglang.test.ci.ci_register import (
+    register_amd_ci,
+    register_cuda_ci,
+    register_hcu_ci,
+)
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
     DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
@@ -25,9 +29,14 @@ from sglang.test.test_utils import (
     write_github_step_summary,
 )
 
-register_cuda_ci(est_time=120, suite="stage-b-test-1-gpu-large")
+register_cuda_ci(est_time=120, stage="stage-b", runner_config="1-gpu-large")
 register_amd_ci(est_time=120, suite="stage-b-test-1-gpu-large-amd")
-register_hcu_ci(est_time=120, suite="nightly-hcu-perf", nightly=True, disabled='HCU Full Enabled run 26941698027 failed; keep disabled until BW1100 failure is fixed or revalidated.')
+register_hcu_ci(
+    est_time=120,
+    suite="nightly-hcu-perf",
+    nightly=True,
+    disabled="HCU Full Enabled run 26941698027 failed; keep disabled until BW1100 failure is fixed or revalidated.",
+)
 
 
 class TestBenchOneBatch1GPU(CustomTestCase):

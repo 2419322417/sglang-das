@@ -378,7 +378,7 @@ def _get_aiter_w8a8_weights_for_solution(
     moe_config,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.moe import MoeSolutionType
-    from aiter.ops.shuffle import moe_layout_shuffle_gemm1, moe_layout_shuffle_gemm2
+    from aiter.ops.shuffle import moe_layout_shuffle_gemm2
 
     solution_type = moe_config.solution_type
     need_shuffle = getattr(
@@ -401,7 +401,7 @@ def _get_aiter_w8a8_weights_for_solution(
     layer = quant_info.layer
 
     with torch.no_grad():
-        w1_moe_c = moe_layout_shuffle_gemm1(quant_info.w13_weight).view(
+        w1_moe_c = moe_layout_shuffle_gemm2(quant_info.w13_weight).view(
             *quant_info.w13_weight.shape
         )
         w2_moe_c = moe_layout_shuffle_gemm2(quant_info.w2_weight).view(
@@ -500,9 +500,9 @@ def _run_aiter_native(
 
     if runner_config.apply_router_weight_on_input and not quant_info.doweight_stage1:
         # Pre-scale at the Python level for kernels that don't honor doweight_stage1.
-        assert topk_weights.dim() == 2 and topk_weights.shape[-1] == 1, (
-            "apply_router_weight_on_input requires topk=1"
-        )
+        assert (
+            topk_weights.dim() == 2 and topk_weights.shape[-1] == 1
+        ), "apply_router_weight_on_input requires topk=1"
         hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         topk_weights = torch.ones_like(topk_weights)
 

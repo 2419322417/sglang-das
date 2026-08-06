@@ -45,6 +45,7 @@ from sglang.srt.layers.quantization.petit import PetitNvFp4Config
 from sglang.srt.layers.quantization.qoq import QoQConfig
 from sglang.srt.layers.quantization.quark.quark import QuarkConfig
 from sglang.srt.layers.quantization.quark_int4fp8_moe import QuarkInt4Fp8Config
+from sglang.srt.layers.quantization.slimquant_w4a8 import SlimQuantW4A8Int8Config
 from sglang.srt.layers.quantization.slimquant_w4a8_marlin import (
     SlimQuantW4A8Int8MarlinConfig,
 )
@@ -93,6 +94,7 @@ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "auto-round-int8": W8A8Int8Config,
     "modelslim": ModelSlimConfig,
     "quark_int4fp8_moe": QuarkInt4Fp8Config,
+    "slimquant_w4a8": SlimQuantW4A8Int8Config,
     "slimquant_w4a8_marlin": SlimQuantW4A8Int8MarlinConfig,
     "slimquant_marlin": SlimQuantCompressedTensorsMarlinConfig,
     "humming": HummingConfig,
