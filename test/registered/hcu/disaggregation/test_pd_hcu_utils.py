@@ -24,7 +24,7 @@ except ImportError:
     )
 
 
-register_hcu_ci(est_time=30, suite="stage-b-test-1-hcu-small")
+register_hcu_ci(est_time=30, suite="stage-b-test-1-gpu-small-hcu")
 
 
 class TestHcuPDUtils(unittest.TestCase):
