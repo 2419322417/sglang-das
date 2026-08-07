@@ -62,7 +62,8 @@ class TestBW1100Int8W8A8ReferenceHCU(unittest.TestCase):
 
                 actual = blaslt_scaled_mm(
                     q_input,
-                    q_weight,
+                    # HCU KME consumes a column-major [K, N] weight view.
+                    q_weight.t(),
                     input_scales,
                     weight_scales,
                     out_dtype=torch.bfloat16,

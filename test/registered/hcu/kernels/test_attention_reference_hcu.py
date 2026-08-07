@@ -7,7 +7,7 @@ import unittest
 
 import torch
 
-from sglang.srt.layers.attention.triton_ops.decode_attention import (
+from sglang.kernels.ops.attention.decode_attention import (
     decode_attention_fwd,
 )
 from sglang.test.ci.ci_register import register_hcu_ci
