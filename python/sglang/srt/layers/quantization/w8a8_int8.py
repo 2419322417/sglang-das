@@ -61,7 +61,7 @@ _is_cpu = is_cpu()
 _is_cpu_arm64 = is_host_cpu_arm64()
 
 if _is_hcu:
-    from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+    from lightop.quant import per_token_quant_int8
 
 if _is_cuda:
     from sgl_kernel import int8_scaled_mm  # noqa: F401 -- registers the custom op
