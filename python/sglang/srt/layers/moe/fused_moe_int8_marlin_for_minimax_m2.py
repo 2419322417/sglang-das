@@ -38,7 +38,7 @@ import os as _os
 import sys as _sys
 
 import vllm
-from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+from lightop.quant import per_token_quant_int8
 
 _mab_path = _os.path.join(
     _os.path.dirname(vllm.__file__),

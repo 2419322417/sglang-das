@@ -59,7 +59,7 @@ _is_cpu = is_cpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 if _is_hcu:
-    from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+    from lightop.quant import per_token_quant_int8
 
 if _is_cuda:
     pass
@@ -983,6 +983,7 @@ def invoke_fused_moe_kernel(
             ROUTER_TOPK=router_topk,
             **config,
         )
+
 
 @triton.jit
 def tanh(x):

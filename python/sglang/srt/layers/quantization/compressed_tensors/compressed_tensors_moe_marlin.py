@@ -18,12 +18,10 @@ from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 from sglang.srt.utils import direct_register_custom_op, set_weight_attrs
 
 try:
-    from lmslim.layers.fused_moe.fuse_moe_int8_marlin import (
-        fused_experts_impl_int8_marlin,
-    )
+    from lightop.moe import fused_experts_impl_int8_marlin
 except Exception:
     print(
-        "INFO: Please install lmslim if you want to infer the quantitative model of moe.\n"
+        "INFO: Please install lightop if you want to infer the quantitative model of moe.\n"
     )
 
 logger = logging.getLogger(__name__)

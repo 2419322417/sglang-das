@@ -36,7 +36,7 @@ __all__ = ["CompressedTensorsW8A8Int8", "NPUCompressedTensorsW8A8Int8"]
 _is_cuda = is_cuda()
 _is_hcu = is_hcu()
 if _is_hcu:
-    from lmslim.layers.gemm.int8_utils import per_token_quant_int8
+    from lightop.quant import per_token_quant_int8
 
 if _is_cuda:
     pass
