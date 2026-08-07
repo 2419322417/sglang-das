@@ -34,21 +34,21 @@ on:
           - all
           - nightly-hcu-core
           - nightly-hcu-core-functional
-          - nightly-hcu-1gpu
+          - nightly-hcu-1
           - nightly-hcu-accuracy
           - nightly-hcu-accuracy-text
           - nightly-hcu-accuracy-reasoning-code
           - nightly-hcu-vlm
           - nightly-hcu-perf-text
-          - nightly-hcu-large-model-4gpu
-          - nightly-hcu-large-model-8gpu
+          - nightly-hcu-large-model-4
+          - nightly-hcu-large-model-8
           - nightly-hcu-quant-opt
           - nightly-hcu-functional-long
           - nightly-hcu-api-models
           - nightly-hcu-long-scheduler
           - nightly-hcu-long-decoding
-          - nightly-hcu-2gpu
-          - nightly-hcu-4gpu-functional
+          - nightly-hcu-2
+          - nightly-hcu-4-functional
 
 permissions:
   contents: read
@@ -569,9 +569,9 @@ jobs:
             timeout_per_file: 3000
             timeout_minutes: 180
             include_files: ""
-          - name: one-gpu
-            group: nightly-hcu-1gpu
-            suite: nightly-hcu-1-gpu
+          - name: one-hcu
+            group: nightly-hcu-1
+            suite: nightly-hcu-1
             nightly: "true"
             part: 0
             parts: 1
@@ -714,9 +714,9 @@ jobs:
             include_files: ""
             visible_devices: "0,1,2,3,4,5,6,7"
             extra_model_paths: "/public4/share:/public4/opendas/DL_DATA/llm-models"
-          - name: large-model-4gpu
-            group: nightly-hcu-large-model-4gpu
-            suite: nightly-hcu-large-model-4gpu
+          - name: large-model-4-hcu
+            group: nightly-hcu-large-model-4
+            suite: nightly-hcu-large-model-4
             nightly: "true"
             part: 0
             parts: 1
@@ -725,9 +725,9 @@ jobs:
             include_files: ""
             visible_devices: "4,5,6,7"
             extra_model_paths: "/public4/share:/public4/opendas/DL_DATA/llm-models"
-          - name: large-model-8gpu-0
-            group: nightly-hcu-large-model-8gpu
-            suite: nightly-hcu-large-model-8gpu
+          - name: large-model-8-hcu-0
+            group: nightly-hcu-large-model-8
+            suite: nightly-hcu-large-model-8
             nightly: "true"
             part: 0
             parts: 4
@@ -736,9 +736,9 @@ jobs:
             include_files: ""
             visible_devices: "0,1,2,3,4,5,6,7"
             extra_model_paths: "/public4/share:/public4/opendas/DL_DATA/llm-models"
-          - name: large-model-8gpu-1
-            group: nightly-hcu-large-model-8gpu
-            suite: nightly-hcu-large-model-8gpu
+          - name: large-model-8-hcu-1
+            group: nightly-hcu-large-model-8
+            suite: nightly-hcu-large-model-8
             nightly: "true"
             part: 1
             parts: 4
@@ -747,9 +747,9 @@ jobs:
             include_files: ""
             visible_devices: "0,1,2,3,4,5,6,7"
             extra_model_paths: "/public4/share:/public4/opendas/DL_DATA/llm-models"
-          - name: large-model-8gpu-2
-            group: nightly-hcu-large-model-8gpu
-            suite: nightly-hcu-large-model-8gpu
+          - name: large-model-8-hcu-2
+            group: nightly-hcu-large-model-8
+            suite: nightly-hcu-large-model-8
             nightly: "true"
             part: 2
             parts: 4
@@ -758,9 +758,9 @@ jobs:
             include_files: ""
             visible_devices: "0,1,2,3,4,5,6,7"
             extra_model_paths: "/public4/share:/public4/opendas/DL_DATA/llm-models"
-          - name: large-model-8gpu-3
-            group: nightly-hcu-large-model-8gpu
-            suite: nightly-hcu-large-model-8gpu
+          - name: large-model-8-hcu-3
+            group: nightly-hcu-large-model-8
+            suite: nightly-hcu-large-model-8
             nightly: "true"
             part: 3
             parts: 4
@@ -837,9 +837,9 @@ jobs:
             include_files: >-
               registered/constrained_decoding/test_constrained_decoding.py
               registered/openai_server/features/test_json_mode.py
-          - name: two-gpu
-            group: nightly-hcu-2gpu
-            suite: nightly-hcu-2-gpu
+          - name: two-hcu
+            group: nightly-hcu-2
+            suite: nightly-hcu-2
             nightly: "true"
             part: 0
             parts: 1
@@ -847,9 +847,9 @@ jobs:
             timeout_minutes: 120
             include_files: ""
             visible_devices: "0,1"
-          - name: four-gpu-functional
-            group: nightly-hcu-4gpu-functional
-            suite: nightly-hcu-4-gpu-functional
+          - name: four-hcu-functional
+            group: nightly-hcu-4-functional
+            suite: nightly-hcu-4-functional
             nightly: "true"
             part: 0
             parts: 1
