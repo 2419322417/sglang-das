@@ -28,12 +28,12 @@ on:
   workflow_dispatch:
     inputs:
       target_stage_select:
-        description: "Select a HCU stage to run from dropdown (leave empty for all)"
+        description: "Select a HCU stage to run from dropdown"
         required: false
         type: choice
-        default: ""
+        default: all
         options:
-          - ""
+          - all
           - stage-a-test-1-hcu-small
           - stage-b-test-1-hcu-small
       target_stage:
