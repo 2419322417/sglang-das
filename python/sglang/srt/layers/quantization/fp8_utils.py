@@ -35,9 +35,7 @@ if TYPE_CHECKING:
 
 from lightop import gemm_ops as quant_ops
 from lightop.gemm_ops import BlockSize
-from lightop.quant import (
-    per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu,
-)
+from lightop.quant import per_token_group_quant_fp8 as per_token_group_quant_fp8_hcu
 
 from sglang.kernels.ops.quantization.fp8_kernel import (
     fp8_dtype,
