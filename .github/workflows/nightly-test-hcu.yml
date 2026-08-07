@@ -977,7 +977,16 @@ jobs:
 
           echo "Running ${{ matrix.suite }} partition ${{ matrix.part }}/${{ matrix.parts }} nightly=${{ matrix.nightly }}"
           echo "HCU_CI_INSTALL_WHEEL_URLS=${HCU_CI_INSTALL_WHEEL_URLS}"
-          bash "${HCU_CI_CHECKOUT_DIR}/scripts/ci/hcu/hcu_ci_exec.sh" -w /sglang-checkout/test --container-name "${HCU_CI_CONTAINER_NAME}" -- \
+          exec_args=(
+            -w /sglang-checkout/test
+            --container-name "${HCU_CI_CONTAINER_NAME}"
+          )
+          if [[ "${{ matrix.group }}" == "nightly-hcu-accuracy-text" ]]; then
+            exec_args+=(
+              -e SGLANG_HCU_ACCURACY_RESULT_DIR=/sglang-checkout/test-results/hcu-accuracy
+            )
+          fi
+          bash "${HCU_CI_CHECKOUT_DIR}/scripts/ci/hcu/hcu_ci_exec.sh" "${exec_args[@]}" -- \
             "${cmd[@]}"
 
       - name: Judge HumanEval in a restricted container
@@ -1000,6 +1009,21 @@ jobs:
           path: ${{ env.HCU_CI_CHECKOUT_DIR }}/test-results/hcu-reasoning-code/${{ matrix.reasoning_model_key }}
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Capture HCU runtime image ID
+        if: >-
+          always() &&
+          steps.filter.outputs.should_run == 'true' &&
+          (matrix.group == 'nightly-hcu-accuracy-text' ||
+           matrix.group == 'nightly-hcu-accuracy-reasoning-code')
+        run: |
+          set -euo pipefail
+          image_id="$(docker inspect --format '{{.Image}}' "${HCU_CI_CONTAINER_NAME}" 2>/dev/null || true)"
+          if [[ -z "${image_id}" ]]; then
+            image_id="$(docker image inspect --format '{{.Id}}' "${HCU_CI_IMAGE}" 2>/dev/null || true)"
+          fi
+          echo "HCU_CI_RUNTIME_IMAGE_ID=${image_id:-unknown}" >> "${GITHUB_ENV}"
+          echo "Resolved HCU runtime image ID: ${image_id:-unknown}"
 
       - name: Cleanup HCU container
         if: always() && steps.filter.outputs.should_run == 'true'
