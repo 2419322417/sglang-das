@@ -7,7 +7,7 @@ import unittest
 
 import torch
 
-from sglang.srt.layers.quantization.fp8_kernel import (
+from sglang.kernels.ops.quantization.fp8_kernel import (
     per_token_group_quant_fp8,
 )
 from sglang.test.ci.ci_register import register_hcu_ci
