@@ -44,7 +44,12 @@ class _MooncakeServices:
                 "--port",
                 str(self.metadata_port),
             ],
-            ["mooncake_master", "--port", str(self.master_port)],
+            [
+                "mooncake_master",
+                "--port",
+                str(self.master_port),
+                "--default_kv_lease_ttl=60s",
+            ],
         )
         try:
             for command in commands:

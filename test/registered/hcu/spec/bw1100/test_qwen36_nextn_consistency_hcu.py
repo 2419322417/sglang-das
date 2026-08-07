@@ -31,7 +31,7 @@ def _generate(base_url: str, model_path: str, prompt: str) -> str:
             "text": prompt,
             "sampling_params": {
                 "temperature": 0,
-                "max_new_tokens": 64,
+                "max_new_tokens": 16,
             },
         },
         timeout=240,
