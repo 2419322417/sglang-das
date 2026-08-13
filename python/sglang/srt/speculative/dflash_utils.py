@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.sampler import apply_custom_logit_processor
 from sglang.srt.managers.schedule_batch import Req
-from sglang.srt.utils import is_cuda, is_musa
+from sglang.srt.utils import is_cuda, is_musa, is_hcu
 
 DEFAULT_DFLASH_MASK_TOKEN = "<|MASK|>"
 
@@ -49,6 +49,45 @@ else:
     top_k_renorm_prob = None
     top_p_renorm_prob = None
     tree_speculative_sampling_target_only = None
+
+
+def _top_p_renorm_prob_torch(
+    probs: torch.Tensor, top_ps: torch.Tensor
+) -> torch.Tensor:
+    """Torch equivalent of sgl_kernel.top_p_renorm_prob."""
+    from sglang.srt.layers.sampler import top_p_normalize_probs_torch
+
+    return top_p_normalize_probs_torch(probs, top_ps)
+
+
+def _top_k_renorm_prob_torch(
+    probs: torch.Tensor, top_ks: torch.Tensor
+) -> torch.Tensor:
+    """Torch equivalent of sgl_kernel.top_k_renorm_prob.
+
+    Mirrors the top-k mask in top_k_top_p_min_p_sampling_from_probs_torch, then
+    renormalizes and scatters back like top_p_normalize_probs_torch does.
+    """
+    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+    probs_sort[
+        torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1)
+        >= top_ks.view(-1, 1)
+    ] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    return torch.zeros_like(probs_sort).scatter_(-1, probs_idx, probs_sort)
+
+
+# On ROCm/HCU the sgl_kernel wheel exposes the Python wrappers but not the
+# native top_{k,p}_renorm_probs ops, so the imports above leave these None and
+# DSpark's non-greedy verify path (build_dflash_verify_target_probs) hits
+# "TypeError: 'NoneType' object is not callable" as soon as temperature != 0.
+# Fall back to the torch implementations the pytorch sampling backend already
+# uses. tree_speculative_sampling_target_only has no torch equivalent here, so
+# _DFLASH_SAMPLING_VERIFY_AVAILABLE keeps gating the DFlash path unchanged.
+if top_p_renorm_prob is None:
+    top_p_renorm_prob = _top_p_renorm_prob_torch
+if top_k_renorm_prob is None:
+    top_k_renorm_prob = _top_k_renorm_prob_torch
 
 
 def is_dflash_sampling_verify_available() -> bool:
