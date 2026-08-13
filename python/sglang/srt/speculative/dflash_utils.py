@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.sampler import apply_custom_logit_processor
 from sglang.srt.managers.schedule_batch import Req
-from sglang.srt.utils import is_cuda, is_musa, is_hcu
+from sglang.srt.utils import is_cuda, is_musa
 
 DEFAULT_DFLASH_MASK_TOKEN = "<|MASK|>"
 
@@ -51,18 +51,14 @@ else:
     tree_speculative_sampling_target_only = None
 
 
-def _top_p_renorm_prob_torch(
-    probs: torch.Tensor, top_ps: torch.Tensor
-) -> torch.Tensor:
+def _top_p_renorm_prob_torch(probs: torch.Tensor, top_ps: torch.Tensor) -> torch.Tensor:
     """Torch equivalent of sgl_kernel.top_p_renorm_prob."""
     from sglang.srt.layers.sampler import top_p_normalize_probs_torch
 
     return top_p_normalize_probs_torch(probs, top_ps)
 
 
-def _top_k_renorm_prob_torch(
-    probs: torch.Tensor, top_ks: torch.Tensor
-) -> torch.Tensor:
+def _top_k_renorm_prob_torch(probs: torch.Tensor, top_ks: torch.Tensor) -> torch.Tensor:
     """Torch equivalent of sgl_kernel.top_k_renorm_prob.
 
     Mirrors the top-k mask in top_k_top_p_min_p_sampling_from_probs_torch, then
