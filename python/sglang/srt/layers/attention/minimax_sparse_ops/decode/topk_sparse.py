@@ -286,11 +286,17 @@ def _merge_topk_attn_out_kernel(
     o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
     lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
     # standard flash-decoding merge in linear (not log2) space, matching the
-    # decode kernel which uses tl.exp / tl.log.
+    # decode kernel which uses tl.exp / tl.log.  Defensive guards (same as the
+    # full port_opt merge): an all-empty row (every chunk lse = -inf, e.g.
+    # real_topk = 0) would compute exp(-inf - -inf) = NaN; emit clean zeros
+    # instead.  Normal rows are unaffected (wsum > 0, has_valid true).
     lse_max = tl.max(lse, axis=0)
-    weights = tl.exp(lse - lse_max)
-    weights = weights / tl.sum(weights, axis=0)
+    has_valid = lse_max > float("-inf")
+    weights = tl.where(lse > float("-inf"), tl.exp(lse - lse_max), 0.0)
+    wsum = tl.sum(weights, axis=0)
+    weights = weights / tl.where(wsum > 0.0, wsum, 1.0)
     o_merged = tl.sum(o * weights[:, None], axis=0)
+    o_merged = tl.where(has_valid, o_merged, 0.0)
     o_out_ptrs = o_ptr + pid_b * stride_o_b + pid_h * stride_o_h + off_d * stride_o_d
     tl.store(o_out_ptrs, o_merged.to(o_ptr.dtype.element_ty), mask=off_d < head_dim)
 

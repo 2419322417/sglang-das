@@ -216,6 +216,15 @@ def _gqa_share_sparse_fwd_kernel(
             qk += tl.where(pos_mask[None, :], 0, float("-inf"))
             # compute m_ij and l_ij
             m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+            # A fully-masked block (e.g. an out-of-range selection whose
+            # positions all lie past seq_len) leaves m_ij = -inf, and the
+            # exp2(-inf - -inf) = NaN below would poison acc_o/lse_i for the
+            # whole row (NaN * 0 = NaN).  Shifting the baseline to 0 makes
+            # such a block contribute exactly zero mass (online-softmax
+            # rescaling is exact); finite blocks pass through unchanged.
+            # Same guard as the sibling kernels (decode/topk_sparse.py
+            # L227-232, prefill/flash_with_topk_idx.py).
+            m_ij = tl.where(m_ij > float("-inf"), m_ij, 0.0)
             p = tl.exp2(qk - m_ij[:, None])
             l_ij = tl.sum(p, axis=1)
             # scale acc_o
@@ -239,8 +248,16 @@ def _gqa_share_sparse_fwd_kernel(
             # update statistics
             m_i = m_ij
             lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
-        # final scale
-        acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
+        # final scale.  Empty selections keep m_i = lse_i = -inf and the naive
+        # exp2(-inf - (-inf)) = NaN would poison the output; emit clean zeros
+        # (same semantics as the sibling decode kernel guard L227-232 and the
+        # full port_opt guard).
+        scale_final = tl.where(
+            lse_i > float("-inf"),
+            tl.exp2(m_i - lse_i),
+            tl.zeros_like(lse_i),
+        )
+        acc_o = acc_o * scale_final[:, None]
         # save output
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_VD)
         o_ptrs = tl.make_block_ptr(
