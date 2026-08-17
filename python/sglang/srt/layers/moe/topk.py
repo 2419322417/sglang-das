@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import (
@@ -191,10 +192,18 @@ if _is_cuda:
 if _is_cuda or _is_hip or _is_xpu:
     from sglang.kernels.ops.moe import topk_softmax
 
+    # PORT_CUSTOM_MOE (Phase 2, sglang_full parity): prefer the prebuilt
+    # sgl_kernel binary op (the reference repo's import order), falling
+    # back to the JIT module.  The JIT module cannot build on this DCU
+    # (tvm_ffi needs CUDA_HOME) while the reference process runs the
+    # sgl_kernel binary -- same kernel source, same bitwise results.
     try:
-        from sglang.jit_kernel.moe_topk_sigmoid import topk_sigmoid
+        from sgl_kernel import topk_sigmoid
     except ImportError:
-        pass
+        try:
+            from sglang.jit_kernel.moe_topk_sigmoid import topk_sigmoid
+        except ImportError:
+            pass
 if _use_aiter:
     try:
         from aiter import biased_grouped_topk as aiter_biased_grouped_topk
@@ -989,23 +998,45 @@ def fused_topk(
                 raise ValueError(
                     "sigmoid topk supports at most one fused shared expert"
                 )
-            scale = (
-                routed_scaling_factor
+            if os.environ.get("PORT_CUSTOM_MOE") == "1":
+                # PORT_CUSTOM_MOE (Phase 2, sglang_full parity): identical
+                # call to the reference -- topk_sigmoid (sgl_kernel binary,
+                # renorm inside: w / (sum + 1e-20)) WITHOUT the routed
+                # scaling factor (kernel scale path would compute
+                # w * (rsf/sum), a different fp32 rounding), then the RSF
+                # multiply outside (exact for power-of-two rsf like the M3
+                # 2.0).  Matches sglang_full's fused_topk sigmoid branch
+                # bitwise.
+                topk_sigmoid(
+                    topk_weights,
+                    topk_ids,
+                    gating_output,
+                    renormalize,
+                    correction_bias,
+                )
                 if (
                     apply_routed_scaling_factor_on_output
                     and routed_scaling_factor is not None
+                ):
+                    topk_weights *= routed_scaling_factor
+            else:
+                scale = (
+                    routed_scaling_factor
+                    if (
+                        apply_routed_scaling_factor_on_output
+                        and routed_scaling_factor is not None
+                    )
+                    else 1.0
                 )
-                else 1.0
-            )
-            topk_sigmoid(
-                topk_weights,
-                topk_ids,
-                gating_output,
-                renormalize,
-                correction_bias,
-                scale,
-                num_fused_shared_experts,
-            )
+                topk_sigmoid(
+                    topk_weights,
+                    topk_ids,
+                    gating_output,
+                    renormalize,
+                    correction_bias,
+                    scale,
+                    num_fused_shared_experts,
+                )
     else:
         raise ValueError(f"Invalid scoring function: {scoring_func}")
 
@@ -2215,6 +2246,17 @@ def select_experts(
 
         # Keep sigmoid flag-off byte-identical: only use the JIT gate when the flag is on.
         use_jit_fused_gate = envs.SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK.get()
+        # PORT_CUSTOM_MOE (Phase 2, sglang_full parity): the reference
+        # (min_fake) runs with SGLANG_OPT_USE_JIT_KERNEL_FUSED_TOPK=false
+        # (sglang_porting/scripts/env_vars.py) -> its sigmoid routing goes
+        # through fused_topk -> topk_sigmoid (sgl_kernel/jit moe_topk_sigmoid),
+        # while the das default (EnvBool True) routes to the JIT
+        # moe_fused_gate kernel -- same selection set but different
+        # renorm/RSF rounding (~1 fp32 ULP per element), which flips bf16
+        # output elements of the MoE combine.  Force the reference kernel
+        # under the alignment gate.
+        if os.environ.get("PORT_CUSTOM_MOE") == "1":
+            use_jit_fused_gate = False
         if scoring_func == "sqrtsoftplus" or (
             scoring_func == "sigmoid" and use_jit_fused_gate
         ):

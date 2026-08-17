@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -43,7 +44,7 @@ from sglang.srt.utils import (
 from sglang.srt.utils.custom_op import register_custom_op
 
 from .fused_moe_triton_config import get_config_dtype_str, try_get_optimal_moe_config
-from .moe_align_block_size import moe_align_block_size
+from .moe_align_block_size import dcu_moe_align_block_size, moe_align_block_size
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.topk import StandardTopKOutput
@@ -730,9 +731,21 @@ def _prepare_fused_moe_run(
         and down_config.pop("USE_TMA", False)
     )
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, config["BLOCK_SIZE_M"], E
-    )
+    # PORT_CUSTOM_MOE (Phase 2, sglang_full parity): the reference repo
+    # uses dcu_moe_align_block_size (lightop, num_experts, Is_fuse_fill=True)
+    # for the triton MoE alignment; the das default moe_align_block_size
+    # (lightop, num_experts+1 sentinel) produces a different sorted-token
+    # order, which changes the per-token topk sum-reduce accumulation order
+    # and leaves ULP-level diffs (fake-6L: 2 elements per MoE layer after
+    # the port_opt sparse-prefill alignment).
+    if os.environ.get("PORT_CUSTOM_MOE") == "1":
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            dcu_moe_align_block_size(topk_ids, config["BLOCK_SIZE_M"], E)
+        )
+    else:
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, config["BLOCK_SIZE_M"], E
+        )
 
     return (
         config,

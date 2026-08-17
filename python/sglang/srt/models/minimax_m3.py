@@ -16,6 +16,7 @@
 """Inference-only MiniMax M3 model compatible with HuggingFace weights."""
 
 import logging
+import math
 import os
 from contextlib import nullcontext
 from typing import Iterable, List, Optional, Set, Tuple, Union
@@ -458,6 +459,29 @@ class MiniMaxM3MoE(nn.Module):
         else:
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
+
+        # Phase 2 diagnostic (M3_DUMP_MOE_DIR, env-gated): dump the routing
+        # internals for cross-framework comparison (same file names as the
+        # sglang_full SGLANG_DUMP_DIR moe dumps).  Prefill-only in the das
+        # harness (no decode), so no overwrite hazard.
+        _moe_dump_dir = os.environ.get("M3_DUMP_MOE_DIR")
+        if _moe_dump_dir and hidden_states.shape[0] > 1:
+            import os as _os
+
+            _d = _os.path.join(_moe_dump_dir, f"layer_{self.layer_id}")
+            _os.makedirs(_d, exist_ok=True)
+            torch.save(
+                router_logits.detach().cpu(),
+                _os.path.join(_d, "router_logits.pt"),
+            )
+            torch.save(
+                topk_output.topk_weights.detach().cpu(),
+                _os.path.join(_d, "topk_weights.pt"),
+            )
+            torch.save(
+                topk_output.topk_ids.detach().cpu(),
+                _os.path.join(_d, "topk_ids.pt"),
+            )
 
         final_hidden_states = self.experts(hidden_states, topk_output)
 
@@ -1120,6 +1144,57 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        # PORT_CUSTOM_ATTN (Phase 2, sglang_full parity): SEPARATE q/k/v
+        # (and index q/k/v) F.linears on slices of the (dequantized) fused
+        # weight, instead of one fused qkv gemm.  sglang_full's forward_prepare
+        # uses separate matmuls because the larger fused matmul uses a
+        # different tile schedule on this GPU -> different bf16 rounding
+        # (Phase 2 finding #3); the tiny differences get amplified by
+        # attention + residual cancellations into few-element 10-30%
+        # deviations that flip the MoE router's marginal topk selection
+        # (Phase 2 localization: layer 3-5 cos drop is 100% in the MoE
+        # module; router logits cos 0.9999 but 100% bitneq -> topk flip on
+        # the last token -> MoE output cos 0.96).
+        if os.environ.get("PORT_CUSTOM_ATTN") == "1":
+            import torch.nn.functional as _F
+
+            w = getattr(self.qkv_proj, "_dequantized_weight", None)
+            if w is None:
+                w = self.qkv_proj.weight
+            q_end = self.q_size
+            k_end = q_end + self.kv_size
+            q_w = w[:q_end, :].contiguous()
+            k_w = w[q_end:k_end, :].contiguous()
+            v_w = w[k_end:, :].contiguous()
+            q = _F.linear(hidden_states, q_w)
+            k = _F.linear(hidden_states, k_w)
+            v = _F.linear(hidden_states, v_w)
+
+            if self.is_sparse_attention_layer:
+                wi = getattr(self.index_qkv_proj, "_dequantized_weight", None)
+                if wi is None:
+                    wi = self.index_qkv_proj.weight
+                idx_q_size = self.num_idx_heads * self.idx_head_dim
+                idx_q_w = wi[:idx_q_size, :].contiguous()
+                idx_k_w = wi[
+                    idx_q_size : idx_q_size + self.idx_head_dim, :
+                ].contiguous()
+                idx_q = _F.linear(hidden_states, idx_q_w)
+                idx_k = _F.linear(hidden_states, idx_k_w)
+                if self.disable_index_value:
+                    idx_v = None
+                else:
+                    idx_v_w = wi[idx_q_size + self.idx_head_dim :, :].contiguous()
+                    idx_v = _F.linear(hidden_states, idx_v_w)
+                q, k = self._qk_norm_rope(positions, q, k)
+                idx_q, idx_k = self._index_qk_norm_rope(positions, idx_q, idx_k)
+                inner_state = (q, k, v, idx_q, idx_k, idx_v, forward_batch)
+                return None, forward_batch, inner_state
+
+            q, k = self._qk_norm_rope(positions, q, k)
+            inner_state = (q, k, v, forward_batch)
+            return None, forward_batch, inner_state
+
         fused_out = None
         if self._fused_qkv_index is not None:
             fused_out = self.fused_qkv_index_proj(hidden_states)
@@ -1260,6 +1335,75 @@ class MiniMaxM3Attention(nn.Module):
                         kv_pool.set_index_kv_buffer(
                             self.attn, out_cache_loc, idx_k, idx_v
                         )
+
+                # PORT_CUSTOM_ATTN_SPARSE_PORTOPT (Phase 2): run the
+                # sglang_full port_opt sparse prefill kernels (score/topk/
+                # sparse-attn triton pipeline, ported verbatim into
+                # sglang.srt.layers.attention.port_opt) -- the EXACT kernels
+                # the min_fake reference runs under PORT_OPT_ATTN_PREFILL=1.
+                # The ALIGN fp32-bmm path below is the same math family but
+                # differs in accumulation order (tl.dot vs torch.bmm,
+                # online vs full softmax), which leaves ULP-level residual
+                # (fake-6L layers 3-5: 0.99985/0.99964/0.99933 after the
+                # separate-projection fix).  This gate makes the sparse
+                # prefill bitwise identical to the reference instead.
+                if (
+                    os.environ.get("PORT_CUSTOM_ATTN_SPARSE_PORTOPT") == "1"
+                    and not forward_batch.forward_mode.is_decode()
+                    and B > 0
+                ):
+                    # The reference (sglang_full) only takes this branch for
+                    # disable_index_value layers (all sparse layers in this
+                    # model), so idx_o is never computed here.
+                    if not self.disable_index_value:
+                        raise AssertionError(
+                            "PORT_CUSTOM_ATTN_SPARSE_PORTOPT requires "
+                            "disable_index_value (reference branch contract)"
+                        )
+                    from sglang.srt.layers.attention.port_opt.prefill import (
+                        prefill_sparse_attention,
+                    )
+
+                    cu_seqlens_prefill = torch.cat(
+                        [
+                            forward_batch.extend_start_loc.to(
+                                device, dtype=torch.int32
+                            ),
+                            torch.tensor(
+                                [forward_batch.extend_num_tokens],
+                                dtype=torch.int32,
+                                device=device,
+                            ),
+                        ]
+                    )
+                    attn_output = prefill_sparse_attention(
+                        q,
+                        idx_q,
+                        kv_pool.get_key_buffer(self.attn.layer_id),
+                        kv_pool.get_value_buffer(self.attn.layer_id),
+                        kv_pool.get_index_k_buffer(self.attn.layer_id),
+                        req_pool.req_to_token,
+                        forward_batch.req_pool_indices,
+                        forward_batch.seq_lens,
+                        forward_batch.positions,
+                        num_q_heads=self.num_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        num_idx_heads=self.num_idx_heads,
+                        head_dim=self.head_dim,
+                        idx_head_dim=self.idx_head_dim,
+                        max_kv_slots=kv_pool.get_key_buffer(
+                            self.attn.layer_id
+                        ).shape[0],
+                        scale=1.0 / math.sqrt(self.head_dim),
+                        idx_scale=1.0 / math.sqrt(self.idx_head_dim),
+                        block_size=self.sparse_block_size,
+                        topk_blocks=self.sparse_topk_blocks,
+                        local_blocks=self.sparse_local_blocks,
+                        cu_seqlens=cu_seqlens_prefill,
+                    )
+                    attn_output = attn_output.reshape(B, -1).to(dtype)
+                    output, _ = self.o_proj(attn_output)
+                    return output
 
                 req_to_token = req_pool.req_to_token
                 seq_len = int(forward_batch.seq_lens_cpu[0])
