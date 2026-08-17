@@ -17,6 +17,7 @@
 """Fused operators for normalization layers."""
 
 import logging
+import os
 from typing import Optional, Tuple, Union
 
 import torch
@@ -743,6 +744,13 @@ class GemmaRMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): use pure PyTorch float32
+        # RMSNorm to match minimal_inference reference.  The native
+        # gemma_rmsnorm / gemma_fused_add_rmsnorm HIP kernels (sgl_kernel /
+        # lightop / vllm) use different internal precision or reduction
+        # order, producing divergent results vs the torch fp32 chain.
+        if os.environ.get("PORT_CUSTOM_NORM") == "1":
+            return self.forward_native(x, residual, post_residual_addition)
         needs_reshape = x.dim() != 2 and residual is None
         if needs_reshape:
             original_shape = x.shape
@@ -785,6 +793,10 @@ class GemmaRMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): pure PyTorch float32
+        # RMSNorm matching minimal_inference reference.
+        if os.environ.get("PORT_CUSTOM_NORM") == "1":
+            return self.forward_native(x, residual, post_residual_addition)
         return self._forward_impl(x, residual, post_residual_addition)
 
     def forward_hip(
@@ -793,6 +805,11 @@ class GemmaRMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): pure PyTorch float32
+        # RMSNorm matching minimal_inference reference (sglang_full runs
+        # with PORT_CUSTOM_NORM=1 on the production M3 path).
+        if os.environ.get("PORT_CUSTOM_NORM") == "1":
+            return self.forward_native(x, residual, post_residual_addition)
         if _use_aiter and _has_rocm_triton_gemma_rms_norm:
             if residual is not None:
                 if post_residual_addition is not None:

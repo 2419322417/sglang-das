@@ -16,6 +16,7 @@
 """Inference-only MiniMax M3 model compatible with HuggingFace weights."""
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
@@ -209,6 +210,16 @@ def build_minimax_fused_qkv_index(model: nn.Module) -> None:
 
 
 class MiniMaxM3MLP(nn.Module):
+    """MiniMax-M3 Dense MLP (SwiGLUOAI).
+
+    Supports PORT_CUSTOM_FFN=1 (sglang_full alignment) which:
+      1. Uses float32 SwiGLUOAI (matching the sglang_full PORT_CUSTOM_FFN
+         reference / minimal_inference golden).
+      2. Splits gate/up matmuls into separate F.linear calls (the
+         bf16-dequantized weight when PORT_CUSTOM_DEQUANT=1, see
+         W8A8Int8LinearMethod), avoiding the fused merged-GEMM accumulation.
+    """
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -221,7 +232,9 @@ class MiniMaxM3MLP(nn.Module):
     ) -> None:
         super().__init__()
         hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size
         hidden_act = config.hidden_act
+        self._port_custom_ffn = os.environ.get("PORT_CUSTOM_FFN") == "1"
 
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
@@ -245,17 +258,37 @@ class MiniMaxM3MLP(nn.Module):
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "swigluoai":
-            from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
-                swiglu_no_interleaved_with_alpha_and_limit,
-            )
+            if self._port_custom_ffn:
+                self.act_fn = lambda x: MiniMaxM3MLP._swiglu_float32(
+                    x, config.swiglu_alpha, config.swiglu_limit
+                )
+            else:
+                from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
+                    swiglu_no_interleaved_with_alpha_and_limit,
+                )
 
-            self.act_fn = lambda x: swiglu_no_interleaved_with_alpha_and_limit(
-                x, config.swiglu_alpha, config.swiglu_limit
-            )
+                self.act_fn = lambda x: swiglu_no_interleaved_with_alpha_and_limit(
+                    x, config.swiglu_alpha, config.swiglu_limit
+                )
         else:
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
+
+    @staticmethod
+    def _swiglu_float32(x: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
+        """SwiGLUOAI with float32 internal for sigmoid/clamp -- matches the
+        sglang_full PORT_CUSTOM_FFN reference (minimal_inference golden):
+            gate = gate.clamp(max=limit).float()
+            up   = up.clamp(-limit, limit).float()
+            out  = gate * sigmoid(gate * alpha) * (up + 1.0)
+        """
+        orig_dtype = x.dtype
+        gate, up = x.chunk(2, dim=-1)
+        gate_f = gate.float().clamp(max=limit)
+        up_f = up.float().clamp(min=-limit, max=limit)
+        act = gate_f * torch.sigmoid(gate_f * alpha) * (up_f + 1.0)
+        return act.to(orig_dtype)
 
     def forward(
         self,
@@ -263,7 +296,22 @@ class MiniMaxM3MLP(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
     ):
-        gate_up, _ = self.gate_up_proj(x)
+        # PORT_CUSTOM_FFN (sglang_full alignment): split gate/up matmuls --
+        # same arithmetic as sglang_full's PORT_CUSTOM_FFN reference run.
+        if self._port_custom_ffn:
+            if hasattr(self.gate_up_proj, "_dequantized_weight"):
+                w = self.gate_up_proj._dequantized_weight
+            else:
+                w = self.gate_up_proj.weight
+            tp_sz = get_parallel().tp_size
+            half = self.intermediate_size // tp_sz
+            gate_w = w[:half, :].contiguous()
+            up_w = w[half:, :].contiguous()
+            gate = torch.nn.functional.linear(x, gate_w)
+            up = torch.nn.functional.linear(x, up_w)
+            gate_up = torch.cat([gate, up], dim=-1).to(x.dtype)
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(
             x,
@@ -352,12 +400,22 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.bf16_router_gemm = envs.SGLANG_OPT_USE_BF16_ROUTER_GEMM.get()
+        # PORT_CUSTOM_MOE / PORT_CUSTOM_MOE_ROUTING (sglang_full alignment):
+        # sglang_full keeps the router weight bf16 (checkpoint dtype) and
+        # computes the logits with an fp32 gemm (F.linear(hs.fp32, gate.fp32))
+        # on the PORT_CUSTOM_MOE_ROUTING path; the das default
+        # SGLANG_OPT_USE_BF16_ROUTER_GEMM=true bf16 gemm is disabled under
+        # the alignment gate so the logits arithmetic matches.
+        self.bf16_router_gemm = envs.SGLANG_OPT_USE_BF16_ROUTER_GEMM.get() and (
+            os.environ.get("PORT_CUSTOM_MOE_ROUTING") != "1"
+        )
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.bfloat16 if self.bf16_router_gemm else torch.float32,
+            params_dtype=torch.bfloat16
+            if (self.bf16_router_gemm or os.environ.get("PORT_CUSTOM_MOE") == "1")
+            else torch.float32,
             quant_config=None,
             prefix=add_prefix("gate", prefix),
         )
@@ -438,6 +496,13 @@ class MiniMaxM3MoE(nn.Module):
         return final_hidden_states
 
     def _compute_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # PORT_CUSTOM_MOE_ROUTING (sglang_full alignment): fp32 gemm on the
+        # fp32-cast bf16 gate weight -- exactly the sglang_full
+        # PORT_CUSTOM_MOE_ROUTING chain (F.linear(hs.fp32, gate_w.fp32)).
+        if os.environ.get("PORT_CUSTOM_MOE_ROUTING") == "1":
+            return torch.nn.functional.linear(
+                hidden_states.float(), self.gate.weight.float()
+            )
         if self.bf16_router_gemm:
             return torch.mm(
                 hidden_states, self.gate.weight.t(), out_dtype=torch.float32
@@ -519,6 +584,26 @@ class MiniMaxM3Attention(nn.Module):
             self.idx_replica_size = attn_tp_size // self.idx_head_tp_size
             self.idx_head_rank = attn_tp_rank // self.idx_replica_size
             self.num_idx_heads = self.total_idx_heads // self.idx_head_tp_size
+
+            # Sparse block selection parameters (PORT_CUSTOM_ATTN path,
+            # matching minimal_inference/layers.py compute_sparse_attention
+            # constants like sglang_full).
+            self.sparse_block_size = sparse_cfg["sparse_block_size"]
+            self.sparse_topk_blocks = sparse_cfg["sparse_topk_blocks"]
+            if "sparse_init_block" in sparse_cfg:
+                self.sparse_init_blocks = sparse_cfg["sparse_init_block"]
+            else:
+                init_tokens = sparse_cfg["sparse_init_tokens"]
+                self.sparse_init_blocks = (
+                    init_tokens + self.sparse_block_size - 1
+                ) // self.sparse_block_size
+            if "sparse_local_block" in sparse_cfg:
+                self.sparse_local_blocks = sparse_cfg["sparse_local_block"]
+            else:
+                local_tokens = sparse_cfg["sparse_local_tokens"]
+                self.sparse_local_blocks = (
+                    local_tokens + self.sparse_block_size - 1
+                ) // self.sparse_block_size + 1
 
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -718,6 +803,16 @@ class MiniMaxM3Attention(nn.Module):
     def _qk_norm_rope(
         self, positions: torch.Tensor, q: torch.Tensor, k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): skip the fused HIP
+        # qk-norm+rope kernel and use the separated GemmaRMSNorm
+        # (forward_native fp32 chain) + rotary_emb (compiled fp32 rope) --
+        # the sglang_full production reference under PORT_CUSTOM_NORM=1.
+        if (
+            os.environ.get("PORT_CUSTOM_NORM") == "1"
+            and self._can_use_rocm_qk_norm_rope(positions, q, k)
+        ):
+            q, k = self._qk_norm(q, k)
+            return self.rotary_emb(positions, q, k)
         if self._can_use_rocm_qk_norm_rope(positions, q, k):
             return qk_gemma_rmsnorm_rope(
                 q,
@@ -762,6 +857,20 @@ class MiniMaxM3Attention(nn.Module):
     def _index_qk_norm_rope(
         self, positions: torch.Tensor, idx_q: torch.Tensor, idx_k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): skip the fused HIP
+        # index qk-norm+rope kernel; use _index_qk_norm (forward_native
+        # fp32) + index_rotary_emb (compiled fp32 rope) like sglang_full.
+        if (
+            os.environ.get("PORT_CUSTOM_NORM") == "1"
+            and self._can_use_rocm_index_qk_norm_rope_static
+            and positions.dim() == 1
+            and idx_q.dim() == 2
+            and idx_k.dim() == 2
+            and idx_q.dtype in (torch.bfloat16, torch.float16)
+            and idx_k.dtype == idx_q.dtype
+        ):
+            idx_q, idx_k = self._index_qk_norm(idx_q, idx_k)
+            return self.index_rotary_emb(positions, idx_q, idx_k)
         if (
             self._can_use_rocm_index_qk_norm_rope_static
             and positions.dim() == 1
@@ -897,6 +1006,19 @@ class MiniMaxM3Attention(nn.Module):
         idx_q: torch.Tensor,
         idx_k: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # PORT_CUSTOM_NORM (sglang_full alignment): skip the fused HIP
+        # sparse q/k + index q/k norm+rope kernel; use the separated
+        # _qk_norm_rope / _index_qk_norm_rope (both fp32-native under
+        # PORT_CUSTOM_NORM) like sglang_full.
+        if (
+            os.environ.get("PORT_CUSTOM_NORM") == "1"
+            and self._can_use_rocm_sparse_qk_index_norm_rope(
+                positions, q, k, idx_q, idx_k
+            )
+        ):
+            q, k = self._qk_norm_rope(positions, q, k)
+            idx_q, idx_k = self._index_qk_norm_rope(positions, idx_q, idx_k)
+            return q, k, idx_q, idx_k
         if self._can_use_rocm_sparse_qk_index_norm_rope(positions, q, k, idx_q, idx_k):
             return sparse_qk_index_gemma_rmsnorm_rope(
                 q,
@@ -952,7 +1074,8 @@ class MiniMaxM3Attention(nn.Module):
         # fp8 main K/V cache (--kv-cache-dtype fp8_*) can't use it; fall back to norm+rope.
         main_kv_is_fp8 = kv_pool is not None and kv_pool.dtype in _FP8_KV_DTYPES
         can_use_cache_fusion = (
-            not main_kv_is_fp8
+            os.environ.get("PORT_CUSTOM_NORM") != "1"
+            and not main_kv_is_fp8
             and idx_v is None
             and self._can_use_rocm_sparse_qk_index_norm_rope(
                 positions, q, k, idx_q, idx_k
@@ -1087,6 +1210,17 @@ class MiniMaxM3Attention(nn.Module):
             inner_state = (q, k, v, forward_batch)
         return None, forward_batch, inner_state
 
+    def _align_pools(self):
+        """PORT_CUSTOM_ATTN (sglang_full alignment): resolve the KV pool and
+        the req-to-token pool from the global ForwardContext.  The das
+        ForwardBatch carries no pool refs (unlike sglang_full); pools live on
+        the attention backend resolved at forward time."""
+        from sglang.srt.model_executor.forward_context import get_forward_context
+
+        attn_backend = get_forward_context().attn_backend
+        dense_backend = getattr(attn_backend, "dense", attn_backend)
+        return dense_backend.token_to_kv_pool, dense_backend.req_to_token_pool
+
     def forward_core(self, intermediate_state):
         _, _, inner_state = intermediate_state
 
@@ -1099,6 +1233,184 @@ class MiniMaxM3Attention(nn.Module):
             idx_k = idx_k.reshape(idx_k.shape[0], 1, self.idx_head_dim)
             if idx_v is not None:
                 idx_v = idx_v.reshape(idx_v.shape[0], 1, self.idx_head_dim)
+
+            # PORT_CUSTOM_ATTN (sglang_full alignment): PyTorch sparse
+            # attention with index-based block selection, matching
+            # minimal_inference/layers.py compute_sparse_attention() and the
+            # sglang_full PORT_CUSTOM_ATTN reference.  K/V (+ index K) are
+            # written to the caches first, then the FULL sequence is
+            # gathered back so decode steps attend to all previous tokens.
+            # PORT_CUSTOM_ATTN_SPARSE_ALIGN=1 selects the float32 bmm
+            # arithmetic (golden math); otherwise the SDPA fallback runs.
+            if os.environ.get("PORT_CUSTOM_ATTN") == "1":
+                B = q.shape[0]
+                device = q.device
+                dtype = q.dtype
+                kv_pool, req_pool = self._align_pools()
+
+                if B > 0:
+                    out_cache_loc = forward_batch.out_cache_loc
+                    if not out_cache_loc.is_contiguous():
+                        out_cache_loc = out_cache_loc.contiguous()
+                    if self.disable_index_value:
+                        kv_pool.set_kv_buffer(self.attn, out_cache_loc, k, v)
+                        kv_pool.set_index_k_buffer(self.attn, out_cache_loc, idx_k)
+                    else:
+                        kv_pool.set_kv_buffer(self.attn, out_cache_loc, k, v)
+                        kv_pool.set_index_kv_buffer(
+                            self.attn, out_cache_loc, idx_k, idx_v
+                        )
+
+                req_to_token = req_pool.req_to_token
+                seq_len = int(forward_batch.seq_lens_cpu[0])
+                locs = req_to_token[
+                    forward_batch.req_pool_indices[0], :seq_len
+                ]  # [N] cache slots, newest last
+                k_cache = kv_pool.get_key_buffer(self.attn.layer_id)
+                v_cache = kv_pool.get_value_buffer(self.attn.layer_id)
+                k_hist = k_cache[locs]  # [N, num_kv_heads, head_dim]
+                v_hist = v_cache[locs]
+                if self.disable_index_value:
+                    idx_k_hist = kv_pool.get_index_k_buffer(self.attn.layer_id)[locs]
+                    idx_v_hist = None
+                else:
+                    idx_k_cache, idx_v_cache = kv_pool.get_index_kv_buffer(
+                        self.attn.layer_id
+                    )
+                    idx_k_hist = idx_k_cache[locs]
+                    idx_v_hist = idx_v_cache[locs]
+                N = seq_len
+
+                # Step 1: index attention scores (idx_q @ idx_k^T)
+                idx_k_sq = idx_k_hist.squeeze(1)  # [N, idx_head_dim]
+                idx_k_all = idx_k_sq.unsqueeze(0).expand(B, -1, -1)
+                idx_scale = 1.0 / (self.idx_head_dim ** 0.5)
+                idx_scores = torch.bmm(
+                    idx_q.float(), idx_k_all.float().transpose(1, 2)
+                ) * idx_scale  # [B, num_idx_heads, N]
+
+                # Step 2: block-level max aggregation
+                num_blocks = (
+                    N + self.sparse_block_size - 1
+                ) // self.sparse_block_size
+                block_scores = torch.full(
+                    (B, self.num_idx_heads, num_blocks),
+                    float("-inf"),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                for blk in range(num_blocks):
+                    s = blk * self.sparse_block_size
+                    e = min(s + self.sparse_block_size, N)
+                    block_scores[:, :, blk] = (
+                        idx_scores[:, :, s:e].max(dim=-1).values
+                    )
+
+                # Step 3: select topk blocks with init/local block bias
+                topk = min(self.sparse_topk_blocks, num_blocks)
+                topk_indices = torch.full(
+                    (B, self.num_idx_heads, topk), -1, dtype=torch.long, device=device
+                )
+                for pos in range(B):
+                    pos_seq = int(forward_batch.positions[pos])
+                    visible_blocks = (pos_seq // self.sparse_block_size) + 1
+                    for h in range(self.num_idx_heads):
+                        scores_h = block_scores[pos, h, :visible_blocks].clone()
+                        if self.sparse_init_blocks > 0:
+                            scores_h[
+                                : min(self.sparse_init_blocks, visible_blocks)
+                            ] = float("inf")
+                        if self.sparse_local_blocks > 0:
+                            local_start = max(
+                                0, visible_blocks - self.sparse_local_blocks
+                            )
+                            local_bias_start = max(
+                                self.sparse_init_blocks, local_start
+                            )
+                            scores_h[local_bias_start:visible_blocks] = 1e10
+                        k_select = min(topk, visible_blocks)
+                        _, indices = torch.topk(scores_h, k=k_select)
+                        topk_indices[pos, h, :k_select] = indices
+
+                # Step 4: build sparse mask [B, num_kv_heads, N]
+                mask = torch.full(
+                    (B, self.num_kv_heads, N),
+                    float("-inf"),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                for pos in range(B):
+                    pos_seq = int(forward_batch.positions[pos])
+                    for h in range(self.num_idx_heads):
+                        for tk in range(topk):
+                            blk = topk_indices[pos, h, tk].item()
+                            if blk < 0:
+                                continue
+                            s = blk * self.sparse_block_size
+                            e = min(s + self.sparse_block_size, pos_seq + 1)
+                            if s < e:
+                                mask[pos, h, s:e] = 0.0
+
+                # Step 5: GQA expand K, V, and mask
+                gqa_group = self.num_heads // self.num_kv_heads
+                k_gqa = k_hist.repeat_interleave(gqa_group, dim=1)
+                v_gqa = v_hist.repeat_interleave(gqa_group, dim=1)
+                mask_expanded = mask.repeat_interleave(gqa_group, dim=1)
+
+                # Step 6: attention computation
+                scale = 1.0 / (self.head_dim ** 0.5)
+
+                if os.environ.get("PORT_CUSTOM_ATTN_SPARSE_ALIGN") == "1":
+                    # Aligned path: manual bmm matching
+                    # minimal_inference/layers.py compute_sparse_attention()
+                    # -- float32 q@k^T and softmax, bf16 weights bmm (fp32
+                    # accumulation), avoiding SDPA backend precision
+                    # differences on ROCm/HIP with explicit attn_mask.
+                    qh = q.permute(1, 0, 2).float()      # [H, B, D]
+                    kh = k_gqa.permute(1, 2, 0).float()  # [H, D, N]
+                    scores = (
+                        torch.bmm(qh, kh).permute(1, 0, 2) * scale
+                    )  # [B, H, N]
+                    masked_scores = scores + mask_expanded.float()
+                    attn_weights = torch.nn.functional.softmax(
+                        masked_scores, dim=-1
+                    )
+                    wh = attn_weights.to(dtype).permute(1, 0, 2)  # [H, B, N]
+                    vh = v_gqa.permute(1, 0, 2)                   # [H, N, D]
+                    attn_output = torch.bmm(wh, vh).permute(1, 0, 2)
+                    attn_output = attn_output.reshape(B, -1).to(dtype)
+                else:
+                    q_sdpa = q.unsqueeze(0).transpose(1, 2)    # [1, H, B, D]
+                    k_sdpa = k_gqa.unsqueeze(0).transpose(1, 2)
+                    v_sdpa = v_gqa.unsqueeze(0).transpose(1, 2)
+                    mask_sdpa = mask_expanded.permute(1, 0, 2).unsqueeze(0)
+                    attn_output = torch.nn.functional.scaled_dot_product_attention(
+                        q_sdpa, k_sdpa, v_sdpa, attn_mask=mask_sdpa, scale=scale
+                    )
+                    attn_output = (
+                        attn_output.squeeze(0).transpose(0, 1).reshape(B, -1)
+                    ).to(dtype)
+
+                output, _ = self.o_proj(attn_output)
+                if self.disable_index_value:
+                    return output
+
+                # idx_o from index value attention (not reached for the
+                # fake-6L sparse layers: disable_index_value is True).
+                idx_v_sq = idx_v_hist.squeeze(1)  # [N, idx_head_dim]
+                idx_v_all = idx_v_sq.unsqueeze(0).expand(B, -1, -1)
+                mask_idx = mask.float()
+                idx_masked = idx_scores + mask_idx
+                idx_weights = torch.nn.functional.softmax(
+                    idx_masked, dim=-1
+                ).to(dtype)
+                idx_o_3d = torch.bmm(idx_weights, idx_v_all)
+                idx_o = idx_o_3d.reshape(B, -1)
+                if self.idx_replica_size > 1:
+                    idx_o = idx_o / self.idx_replica_size
+                idx_output, _ = self.index_o_proj(idx_o)
+                return output + idx_output
+
             idx_o, attn_output = self.attn(
                 q, k, v, forward_batch, idx_q=idx_q, idx_k=idx_k, idx_v=idx_v
             )
@@ -1113,7 +1425,56 @@ class MiniMaxM3Attention(nn.Module):
             return output + idx_output
 
         q, k, v, forward_batch = inner_state
-        attn_output = self.attn(q, k, v, forward_batch)
+
+        # PORT_CUSTOM_ATTN (sglang_full alignment): PyTorch SDPA instead of
+        # the RadixAttention triton backend -- the sglang_full reference
+        # run's dense attention.  K/V are written to the KV cache first,
+        # then the FULL sequence is gathered back from the cache and GQA-
+        # expanded, then SDPA with is_causal=True for prefix-free prefill
+        # (q_len == k_len) and no mask for decode (q_len == 1, attends to
+        # all gathered keys -- matching minimal_inference's last row).
+        if os.environ.get("PORT_CUSTOM_ATTN") == "1":
+            B = q.shape[0]
+            q_3d = q.view(B, self.num_heads, self.head_dim)
+            k_3d = k.view(B, self.num_kv_heads, self.head_dim)
+            v_3d = v.view(B, self.num_kv_heads, self.head_dim)
+
+            kv_pool, req_pool = self._align_pools()
+            if B > 0:
+                out_cache_loc = forward_batch.out_cache_loc
+                if not out_cache_loc.is_contiguous():
+                    out_cache_loc = out_cache_loc.contiguous()
+                kv_pool.set_kv_buffer(self.attn, out_cache_loc, k_3d, v_3d)
+
+            req_to_token = req_pool.req_to_token
+            seq_len = int(forward_batch.seq_lens_cpu[0])
+            locs = req_to_token[
+                forward_batch.req_pool_indices[0], :seq_len
+            ]  # [N] cache slots, newest last
+            k_cache = kv_pool.get_key_buffer(self.attn.layer_id)
+            v_cache = kv_pool.get_value_buffer(self.attn.layer_id)
+            k_hist = k_cache[locs]  # [N, num_kv_heads, head_dim]
+            v_hist = v_cache[locs]
+
+            # GQA expand over the FULL sequence
+            gqa_group = self.num_heads // self.num_kv_heads
+            k_hist = k_hist.repeat_interleave(gqa_group, dim=1)
+            v_hist = v_hist.repeat_interleave(gqa_group, dim=1)
+
+            q_sdpa = q_3d.unsqueeze(0).transpose(1, 2)    # [1, H, B, D]
+            k_sdpa = k_hist.unsqueeze(0).transpose(1, 2)  # [1, H, N, D]
+            v_sdpa = v_hist.unsqueeze(0).transpose(1, 2)
+
+            scale = 1.0 / (self.head_dim ** 0.5)
+            is_causal = q_sdpa.shape[2] == k_sdpa.shape[2]
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa, k_sdpa, v_sdpa, is_causal=is_causal, scale=scale
+            )
+            attn_output = (
+                attn_output.squeeze(0).transpose(0, 1).reshape(B, -1).to(q.dtype)
+            )
+        else:
+            attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
 

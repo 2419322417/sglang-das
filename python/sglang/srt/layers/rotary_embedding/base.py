@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -127,7 +128,17 @@ class RotaryEmbedding(MultiPlatformOp):
         self._apply_rotary_emb_wrapped = apply_rotary_emb
 
         # XXX (MUSA): Implement sgl_kernel.rotary_embedding support for MUSA backend
-        if get_server_args().rl_on_policy_target is not None or _is_musa:
+        # PORT_CUSTOM_NORM (sglang_full alignment): sglang_full forces the
+        # PyTorch-native rope (forward_native + torch.compile(apply_rotary_emb))
+        # on HIP/DCU -- the compiled triton_poi chain computes the partial-NeoX
+        # rotation in fp32 with a single bf16 rounding at the store, matching
+        # the minimal_inference golden; the sgl_kernel.rotary_embedding HIP
+        # fallback kernel used otherwise has different internal precision.
+        if (
+            get_server_args().rl_on_policy_target is not None
+            or _is_musa
+            or (_is_hip and os.environ.get("PORT_CUSTOM_NORM") == "1")
+        ):
             self._forward_method = self.forward_native
             self._apply_rotary_emb_wrapped = torch.compile(
                 dynamic=True,

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, cast
 
@@ -206,6 +207,22 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         else:
             layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        # PORT_CUSTOM_DEQUANT (sglang_full alignment): fold the per-output-
+        # channel scale into the weight as bf16 -- dequant = int8.to(bf16) *
+        # scale.to(bf16) (per-output-channel broadcast), exactly the W8A8
+        # dequant formula of the minimal-framework dump producer
+        # (trace/minimal_infer_w8a8_stream.py dequantize()).  The stored
+        # weight is transposed to [in, out] by the line above (the int8 gemm
+        # layout); the scale stays [out, 1], so the dequant transposes back
+        # to the golden [out, in] F.linear layout.  apply() then runs a
+        # plain bf16 F.linear (fp32 accumulate), the same arithmetic as the
+        # sglang_full reference run.  Env-gated: the production int8
+        # scaled-gemm path is untouched when the gate is off.
+        if os.environ.get("PORT_CUSTOM_DEQUANT") == "1":
+            layer._dequantized_weight = (
+                layer.weight.data.to(torch.bfloat16).t()
+                * layer.weight_scale.data.to(torch.bfloat16)
+            ).contiguous()
 
     def create_weights(
         self,
@@ -253,6 +270,11 @@ class W8A8Int8LinearMethod(LinearMethodBase):
                 x.dtype,
                 True,  # is_vnni
             )
+        # PORT_CUSTOM_DEQUANT (sglang_full alignment): bf16-dequantized
+        # weight + plain F.linear -- the arithmetic of the minimal-framework
+        # reference run (see process_weights_after_loading).
+        if getattr(layer, "_dequantized_weight", None) is not None:
+            return torch.nn.functional.linear(x, layer._dequantized_weight, bias)
         x_q, x_scale = per_token_quant_int8(x)
 
         x_q_2d = x_q.view(-1, x_q.shape[-1])
@@ -269,6 +291,18 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         )
 
         return output.view(output_shape)
+
+
+def _dequant_moe_param(layer: torch.nn.Module, w_name: str, s_name: str) -> None:
+    """PORT_CUSTOM_DEQUANT helper: replace an int8 MoE weight param with its
+    bf16 dequantization (int8.to(bf16) * scale.to(bf16), per-output-channel
+    broadcast), chunked per expert to bound peak memory."""
+    src = getattr(layer, w_name).data  # [E, ..., out_ch] int8
+    scale = getattr(layer, s_name).data  # [E, ..., 1] fp32
+    out = torch.empty(src.shape, dtype=torch.bfloat16, device=src.device)
+    for e in range(src.shape[0]):
+        out[e] = src[e].to(torch.bfloat16) * scale[e].to(torch.bfloat16)
+    setattr(layer, w_name, torch.nn.Parameter(out, requires_grad=False))
 
 
 class W8A8Int8MoEMethod(FusedMoEMethodBase):
@@ -365,6 +399,19 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         layer.w2_weight_scale = Parameter(
             layer.w2_weight_scale.data, requires_grad=False
         )
+        # PORT_CUSTOM_DEQUANT (sglang_full alignment): fold per-output-channel
+        # scales into bf16 expert weights (dequant = int8.to(bf16) * scale.to(
+        # bf16), per-channel broadcast) -- same formula as the minimal-
+        # framework dump producer; get_triton_quant_info then hands the
+        # standard bf16 (unquantized) FusedMoE kernel these weights, matching
+        # the sglang_full reference arithmetic (bf16 gemm, fp32 accumulate).
+        # The int8 params are REPLACED in place, chunked per expert (the full
+        # [128, 2*3072, 6144] bf16 temp is ~9.7 GiB and OOMs the 64GB card
+        # with the ~31GB model resident; per-expert chunks peak at ~0.25 GiB
+        # and free the int8 storage right away).
+        if os.environ.get("PORT_CUSTOM_DEQUANT") == "1":
+            _dequant_moe_param(layer, "w13_weight", "w13_weight_scale")
+            _dequant_moe_param(layer, "w2_weight", "w2_weight_scale")
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
@@ -385,6 +432,23 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             raise ValueError(f"Unsupported MoE runner backend: {moe_runner_backend}")
 
     def get_triton_quant_info(self, layer: torch.nn.Module) -> TritonMoeQuantInfo:
+        # PORT_CUSTOM_DEQUANT (sglang_full alignment): standard bf16
+        # (unquantized) quant info on the dequantized (bf16-replaced) weights
+        # -- same kernel and arithmetic as the sglang_full bf16 reference run.
+        if (
+            os.environ.get("PORT_CUSTOM_DEQUANT") == "1"
+            and layer.w13_weight.dtype == torch.bfloat16
+        ):
+            return TritonMoeQuantInfo(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                use_int8_w8a8=False,
+                per_channel_quant=False,
+                w13_scale=None,
+                w2_scale=None,
+                a13_scale=None,
+                a2_scale=None,
+            )
         return TritonMoeQuantInfo(
             w13_weight=layer.w13_weight,
             w2_weight=layer.w2_weight,
