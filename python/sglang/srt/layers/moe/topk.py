@@ -1020,23 +1020,77 @@ def fused_topk(
                 ):
                     topk_weights *= routed_scaling_factor
             else:
-                scale = (
-                    routed_scaling_factor
+                # Default MoE path (PORT_CUSTOM_MOE unset).  The installed
+                # sgl_kernel 0.4.2.post2 topk_sigmoid is the 5-param variant
+                # (in-kernel renorm w/(sum+1e-20); no scale /
+                # num_fused_shared_experts args) -- the previous 7-param
+                # call (scale + num_fused_shared_experts) raised
+                # "topk_sigmoid() takes from 3 to 5 positional arguments but
+                # 7 were given" on this environment (2026-08-17 tp8 first
+                # start, watchdog tree kill).  Match sglang_full's
+                # fused_topk sigmoid branch (and this file's PORT_CUSTOM_MOE
+                # branch): 5-param kernel + routed_scaling_factor multiply
+                # outside (exact for power-of-two rsf like the M3 2.0; the
+                # kernel scale path w*(rsf/sum) is a different fp32
+                # rounding).  num_fused_shared_experts (<= 1) fused shared
+                # slots are appended outside the kernel -- id =
+                # num_experts, weight 1.0 with renormalize -- the kernel is
+                # called with topk - num_fused_shared_experts routed slots
+                # only, so the selection set and the renormalize denominator
+                # are exactly the 7-param kernel's (which also selects and
+                # renormalizes over the routed slots only).
+                topk_routed = topk_weights.shape[1] - num_fused_shared_experts
+                if num_fused_shared_experts > 0:
+                    routed_weights = torch.empty(
+                        (M, topk_routed),
+                        dtype=torch.float32,
+                        device=hidden_states.device,
+                    )
+                    routed_ids = torch.empty(
+                        (M, topk_routed),
+                        dtype=torch.int32,
+                        device=hidden_states.device,
+                    )
+                    topk_sigmoid(
+                        routed_weights,
+                        routed_ids,
+                        gating_output,
+                        renormalize,
+                        correction_bias,
+                    )
                     if (
                         apply_routed_scaling_factor_on_output
                         and routed_scaling_factor is not None
+                    ):
+                        routed_weights *= routed_scaling_factor
+                    topk_weights[:, :topk_routed].copy_(routed_weights)
+                    topk_ids[:, :topk_routed].copy_(routed_ids)
+                    topk_ids[:, topk_routed:] = gating_output.shape[1]
+                    if renormalize:
+                        topk_weights[:, topk_routed:] = 1.0
+                    else:
+                        # No-renormalize fused-shared weight = sum of the
+                        # routed sigmoid(+bias) scores (7-param kernel
+                        # semantics; M3 always renormalizes).
+                        scores = gating_output.float().sigmoid()
+                        if correction_bias is not None:
+                            scores = scores + correction_bias
+                        topk_weights[:, topk_routed:] = scores.gather(
+                            1, routed_ids.long()
+                        ).sum(dim=-1, keepdim=True)
+                else:
+                    topk_sigmoid(
+                        topk_weights,
+                        topk_ids,
+                        gating_output,
+                        renormalize,
+                        correction_bias,
                     )
-                    else 1.0
-                )
-                topk_sigmoid(
-                    topk_weights,
-                    topk_ids,
-                    gating_output,
-                    renormalize,
-                    correction_bias,
-                    scale,
-                    num_fused_shared_experts,
-                )
+                    if (
+                        apply_routed_scaling_factor_on_output
+                        and routed_scaling_factor is not None
+                    ):
+                        topk_weights *= routed_scaling_factor
     else:
         raise ValueError(f"Invalid scoring function: {scoring_func}")
 
