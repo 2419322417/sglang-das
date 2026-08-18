@@ -793,10 +793,6 @@ class GemmaRMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # PORT_CUSTOM_NORM (sglang_full alignment): pure PyTorch float32
-        # RMSNorm matching minimal_inference reference.
-        if os.environ.get("PORT_CUSTOM_NORM") == "1":
-            return self.forward_native(x, residual, post_residual_addition)
         return self._forward_impl(x, residual, post_residual_addition)
 
     def forward_hip(

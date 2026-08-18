@@ -460,35 +460,29 @@ class MiniMaxM3MoE(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
-        # Phase 2 diagnostic (M3_DUMP_MOE_DIR, env-gated): dump the routing
-        # internals for cross-framework comparison (same file names as the
-        # sglang_full SGLANG_DUMP_DIR moe dumps).  Prefill-only in the das
-        # harness (no decode), so no overwrite hazard.
-        _moe_dump_dir = os.environ.get("M3_DUMP_MOE_DIR")
-        if _moe_dump_dir and hidden_states.shape[0] > 1:
-            import os as _os
-
-            _d = _os.path.join(_moe_dump_dir, f"layer_{self.layer_id}")
-            _os.makedirs(_d, exist_ok=True)
-            torch.save(
-                router_logits.detach().cpu(),
-                _os.path.join(_d, "router_logits.pt"),
-            )
-            torch.save(
-                topk_output.topk_weights.detach().cpu(),
-                _os.path.join(_d, "topk_weights.pt"),
-            )
-            torch.save(
-                topk_output.topk_ids.detach().cpu(),
-                _os.path.join(_d, "topk_ids.pt"),
-            )
-
         final_hidden_states = self.experts(hidden_states, topk_output)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1 and not should_allreduce_fusion and not use_reduce_scatter:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            if (
+                os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1"
+                and final_hidden_states.dtype in (torch.bfloat16, torch.float32)
+            ):
+                # PORT_CUSTOM_TP_FP32_ACC (default off): MoE experts output is
+                # also a per-rank partial sum; accumulate in fp32 and round
+                # to bf16 once at the end (same treatment as the o_proj /
+                # dense down_proj all-reduces).  With the fp32 MoE w2 GEMM
+                # gate the partial arrives as fp32 (.float() is then a
+                # no-op); with the plain bf16 FusedMoE it arrives as bf16
+                # and is widened here.
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states.float()
+                ).to(torch.bfloat16)
+            else:
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
 
         return final_hidden_states
 
