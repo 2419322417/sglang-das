@@ -29,7 +29,7 @@ from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
 from sglang.srt.environ import envs
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.layers.moe.utils import get_moe_padding_size
-from sglang.srt.runtime_context import get_server_args
+from sglang.srt.runtime_context import get_parallel, get_server_args
 from sglang.srt.utils import (
     cpu_has_amx_support,
     direct_register_custom_op,
@@ -380,7 +380,14 @@ def fused_experts(
         )
         else 1
     )
-    if moe_runner_config.inplace:
+    # PORT_CUSTOM_TP_FP32_ACC (default off): the inplace path returns the
+    # bf16 input buffer, which cannot hold the fp32 w2 partial sums produced
+    # by _fused_moe_kernel_sequence under the gate -- route to the outplace
+    # path so the fp32 result tensor is returned instead.
+    if moe_runner_config.inplace and not (
+        os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1"
+        and get_parallel().moe_tp_size > 1
+    ):
         assert not moe_runner_config.no_combine, "no combine + inplace makes no sense"
         inplace_fused_experts(
             hidden_states,
@@ -806,7 +813,23 @@ def _fused_moe_kernel_sequence(
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
-    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    # PORT_CUSTOM_TP_FP32_ACC (default off): under TP>1 model-parallel MoE
+    # (moe_tp_size > 1) each rank's w2 GEMM is a row-sharded partial sum of
+    # the expert output; keep it in fp32 (fp32 kernel epilogue + fp32
+    # buffers) so the MoE all-reduce downstream accumulates fp32 partials
+    # and rounds to bf16 once at the end -- instead of rounding each
+    # per-rank partial to bf16 here.  The w13 (column-sharded) intermediate
+    # stays bf16 (its output is bitwise-equal to the full GEMM, matching the
+    # reference "fp32 accumulate -> one bf16 rounding" per GEMM).
+    out_dtype = hidden_states.dtype
+    if os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1" and get_parallel().moe_tp_size > 1:
+        out_dtype = torch.float32
+    if out_dtype == torch.float32:
+        compute_type = tl.float32
+    else:
+        compute_type = (
+            tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+        )
 
     padded_tokens = (
         min(num_tokens * topk, E + 1) * (config["BLOCK_SIZE_M"] - 1)
@@ -820,12 +843,14 @@ def _fused_moe_kernel_sequence(
         out_hidden_states = torch.empty(
             (num_tokens, topk, w2.shape[1]),
             device=hidden_states.device,
-            dtype=hidden_states.dtype,
+            dtype=out_dtype,
         )
-    elif inplace:
+    elif inplace and out_dtype == hidden_states.dtype:
         out_hidden_states = hidden_states
     else:
-        out_hidden_states = torch.empty_like(hidden_states)
+        # fp32 gate: the bf16 input buffer cannot hold the fp32 partial
+        # sums, so allocate an fp32 output instead of reusing it in place.
+        out_hidden_states = torch.empty_like(hidden_states, dtype=out_dtype)
 
     use_fused_moe_sum_all_reduce = (
         get_server_args().enable_fused_moe_sum_all_reduce
@@ -1020,7 +1045,7 @@ def _fused_moe_kernel_sequence(
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
         device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        dtype=out_dtype,
     )
 
     # LoRA hooks force the second kernel to write to intermediate_cache3 so

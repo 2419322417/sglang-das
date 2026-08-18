@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -1742,9 +1743,30 @@ class RowParallelLinear(LinearBase):
                     sm.tag(output_parallel)
         else:
             with symm_ctx:
-                output_parallel = self.quant_method.apply(
-                    self, input_parallel, bias=bias_
-                )
+                if (
+                    os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1"
+                    and self.tp_size > 1
+                    and not skip_all_reduce
+                    and getattr(self, "_dequantized_weight", None) is not None
+                ):
+                    # PORT_CUSTOM_TP_FP32_ACC (default off): run the row-
+                    # parallel sharded GEMM (o_proj / index_o_proj / dense
+                    # down_proj partial sums) in fp32 -- fp32 inputs + fp32
+                    # dequantized weight, F.linear fp32 accumulate -> fp32
+                    # output.  The per-rank partial sum is therefore NOT
+                    # rounded to bf16 before the fp32 all-reduce below;
+                    # bf16 is applied once after the all-reduce, matching
+                    # the reference "fp32 accumulate -> one bf16 rounding"
+                    # semantics (up to all-reduce sum-order ULP).
+                    output_parallel = torch.nn.functional.linear(
+                        input_parallel.float(),
+                        self._dequantized_weight.float(),
+                        bias_,
+                    )
+                else:
+                    output_parallel = self.quant_method.apply(
+                        self, input_parallel, bias=bias_
+                    )
 
         # skip_all_reduce: explicit call-site override. Also honor
         # ForwardFlags (fuse_mlp_allreduce / mlp_reduce_scatter) published by
@@ -1768,6 +1790,21 @@ class RowParallelLinear(LinearBase):
                 )
                 if quantize_communications:
                     output = tensor_model_parallel_quant_all_reduce(output_parallel)
+                elif (
+                    os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1"
+                    and output_parallel.dtype in (torch.bfloat16, torch.float32)
+                ):
+                    # PORT_CUSTOM_TP_FP32_ACC (default off): the w8a8 GEMM
+                    # output is a per-rank partial sum (RowParallelLinear
+                    # reduce_results=True, not fused); all-reduce it in fp32
+                    # (fp32 accumulation) and round to bf16 once at the end,
+                    # instead of accumulating bf16 partials.  With the fp32
+                    # GEMM gate above the partial arrives as fp32 (.float()
+                    # is then a no-op); with the plain bf16 GEMM it arrives
+                    # as bf16 and is widened here.
+                    output = tensor_model_parallel_all_reduce(
+                        output_parallel.float()
+                    ).to(torch.bfloat16)
                 else:
                     output = tensor_model_parallel_all_reduce(output_parallel)
         else:

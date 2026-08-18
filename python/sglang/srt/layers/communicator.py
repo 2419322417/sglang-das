@@ -15,6 +15,7 @@
 # limitations under the License.
 # ==============================================================================
 import logging
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -1241,6 +1242,21 @@ class CommunicateWithAllReduceAndLayerNormFn:
                     hidden_states = attention_tensor_model_parallel_quant_all_reduce(
                         hidden_states
                     )
+                elif (
+                    os.environ.get("PORT_CUSTOM_TP_FP32_ACC") == "1"
+                    and hidden_states.dtype in (torch.bfloat16, torch.float32)
+                ):
+                    # PORT_CUSTOM_TP_FP32_ACC (default off): the attention
+                    # o_proj output is a per-rank partial sum
+                    # (RowParallelLinear reduce_results=False); all-reduce it
+                    # in fp32 (fp32 accumulation) and round to bf16 once at
+                    # the end, instead of accumulating bf16 partials.  With
+                    # the fp32 row-parallel GEMM gate the partial arrives as
+                    # fp32 (.float() is then a no-op); with the plain bf16
+                    # GEMM it arrives as bf16 and is widened here.
+                    hidden_states = attention_tensor_model_parallel_all_reduce(
+                        hidden_states.float()
+                    ).to(torch.bfloat16)
                 else:
                     hidden_states = attention_tensor_model_parallel_all_reduce(
                         hidden_states
