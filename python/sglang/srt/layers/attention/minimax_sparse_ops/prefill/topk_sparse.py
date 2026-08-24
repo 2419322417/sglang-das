@@ -9,6 +9,25 @@ import triton.language as tl
 from ..common.utils import check_sparse_kv_fp8, get_cu_seqblocks, robust_allocator
 
 
+_IS_GFX928 = (
+    torch.version.hip is not None
+    and "gfx928" in torch.cuda.get_device_properties(0).gcnArchName
+)
+
+_GQA_SHARE_SPARSE_CONFIGS = (
+    [
+        triton.Config({}, num_warps=num_warps, num_stages=1)
+        for num_warps in (2, 4, 8)
+    ]
+    if _IS_GFX928
+    else [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in (2, 4, 8)
+        for num_stages in (2, 3, 4)
+    ]
+)
+
+
 @triton.heuristics(
     {
         "BLOCK_SIZE_KD": lambda args: triton.next_power_of_2(args["qk_head_dim"]),
@@ -25,13 +44,7 @@ from ..common.utils import check_sparse_kv_fp8, get_cu_seqblocks, robust_allocat
     }
 )
 @triton.autotune(
-    # Configs that fail to compile on the target arch are skipped, so widening
-    # the num_warps x num_stages grid only adds candidates, never a bad kernel.
-    configs=[
-        triton.Config({}, num_warps=nw, num_stages=ns)
-        for nw in (2, 4, 8)
-        for ns in (2, 3, 4)
-    ],
+    configs=_GQA_SHARE_SPARSE_CONFIGS,
     key=[
         "BLOCK_SIZE_Q",
         "BLOCK_SIZE_K",

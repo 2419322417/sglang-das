@@ -9,6 +9,25 @@ import triton.language as tl
 from ..common.utils import check_sparse_kv_fp8, robust_allocator
 
 
+_IS_GFX928 = (
+    torch.version.hip is not None
+    and "gfx928" in torch.cuda.get_device_properties(0).gcnArchName
+)
+
+_GQA_SHARE_SPARSE_CONFIGS = (
+    [
+        triton.Config({}, num_warps=num_warps, num_stages=1)
+        for num_warps in (4, 8)
+    ]
+    if _IS_GFX928
+    else [
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in (4, 8)
+        for num_stages in (2, 3, 4, 5)
+    ]
+)
+
+
 @triton.heuristics(
     {
         "BLOCK_SIZE_H": lambda args: max(
@@ -21,11 +40,7 @@ from ..common.utils import check_sparse_kv_fp8, robust_allocator
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=nw, num_stages=ns)
-        for nw in [4, 8]
-        for ns in [2, 3, 4, 5]
-    ],
+    configs=_GQA_SHARE_SPARSE_CONFIGS,
     key=["BATCH_SIZE_BUCKET", "gqa_group_size", "head_dim", "block_size", "HAS_SINK"],
 )
 @triton.jit
