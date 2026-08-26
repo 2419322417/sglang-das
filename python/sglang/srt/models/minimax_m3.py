@@ -1998,28 +1998,11 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
         if server_args.disable_shared_experts_fusion:
             return
 
-        shared_fusion_env = os.environ.get(
-            "SGLANG_MINIMAX_M3_SHARED_EXPERT_FUSION"
-        )
-        if shared_fusion_env == "1":
-            log_info_on_rank0(
-                logger,
-                "Shared experts fusion gate: "
-                f"module={__file__}, is_cuda={_is_cuda}, is_hip={_is_hip}, "
-                f"torch_hip={torch.version.hip}, "
-                f"enforce={server_args.enforce_shared_experts_fusion}, "
-                f"env={shared_fusion_env}",
-            )
-
         disable_reason = None
         if not getattr(self.config, "n_shared_experts", None):
             disable_reason = "No shared experts are defined in the config."
         elif not _is_cuda and not (
-            _is_hip
-            and (
-                server_args.enforce_shared_experts_fusion
-                or shared_fusion_env == "1"
-            )
+            _is_hip and server_args.enforce_shared_experts_fusion
         ):
             disable_reason = "Shared experts fusion currently requires CUDA devices."
         elif _is_cuda and (_device_sm is not None) and (_device_sm < 80):
