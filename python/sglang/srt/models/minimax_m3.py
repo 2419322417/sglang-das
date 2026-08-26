@@ -107,6 +107,7 @@ _FP8_KV_DTYPES = (
 _M3_FUSED_QKNORM_ROPE_ROTARY_DIM = 64
 
 _has_rocm_qk_norm_rope = False
+_has_rocm_router_gemv = False
 if _is_hip:
     try:
         from sglang.jit_kernel.minimax_m3.qk_norm_rope import (
@@ -119,7 +120,17 @@ if _is_hip:
     except ImportError:
         _has_rocm_qk_norm_rope = False
 
+    try:
+        from sglang.jit_kernel.minimax_m3.router_gemv import (
+            minimax_m3_router_gemv,
+        )
+
+        _has_rocm_router_gemv = True
+    except ImportError:
+        _has_rocm_router_gemv = False
+
 logger = logging.getLogger(__name__)
+_router_gemv_path_logged = False
 
 
 class MultiHeadRMSNorm(nn.Module):
@@ -410,6 +421,18 @@ class MiniMaxM3MoE(nn.Module):
         self.bf16_router_gemm = envs.SGLANG_OPT_USE_BF16_ROUTER_GEMM.get() and (
             os.environ.get("PORT_CUSTOM_MOE_ROUTING") != "1"
         )
+        self.use_minimax_m3_router_gemv = (
+            os.environ.get("SGLANG_MINIMAX_M3_ROUTER_GEMV") == "1"
+        )
+        if self.use_minimax_m3_router_gemv:
+            if not _has_rocm_router_gemv:
+                raise RuntimeError(
+                    "SGLANG_MINIMAX_M3_ROUTER_GEMV requires the ROCm router GEMV kernel"
+                )
+            if not self.bf16_router_gemm:
+                raise RuntimeError(
+                    "SGLANG_MINIMAX_M3_ROUTER_GEMV requires BF16 router weights"
+                )
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_local_experts,
@@ -514,6 +537,8 @@ class MiniMaxM3MoE(nn.Module):
         return final_hidden_states
 
     def _compute_router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        global _router_gemv_path_logged
+
         # PORT_CUSTOM_MOE_ROUTING (sglang_full alignment): fp32 gemm on the
         # fp32-cast bf16 gate weight -- exactly the sglang_full
         # PORT_CUSTOM_MOE_ROUTING chain (F.linear(hs.fp32, gate_w.fp32)).
@@ -521,6 +546,22 @@ class MiniMaxM3MoE(nn.Module):
             return torch.nn.functional.linear(
                 hidden_states.float(), self.gate.weight.float()
             )
+        if (
+            self.use_minimax_m3_router_gemv
+            and tuple(hidden_states.shape) == (1, 6144)
+            and tuple(self.gate.weight.shape) == (128, 6144)
+            and hidden_states.dtype == torch.bfloat16
+            and self.gate.weight.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+            and self.gate.weight.is_contiguous()
+        ):
+            if not _router_gemv_path_logged:
+                logger.info(
+                    "Using MiniMax-M3 exact-shape ROCm router GEMV on layer %s",
+                    self.layer_id,
+                )
+                _router_gemv_path_logged = True
+            return minimax_m3_router_gemv(hidden_states, self.gate.weight)
         if self.bf16_router_gemm:
             return torch.mm(
                 hidden_states, self.gate.weight.t(), out_dtype=torch.float32
@@ -1953,13 +1994,33 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
         return self.model.get_input_embeddings()
 
     def determine_num_fused_shared_experts(self):
-        if get_server_args().disable_shared_experts_fusion:
+        server_args = get_server_args()
+        if server_args.disable_shared_experts_fusion:
             return
+
+        shared_fusion_env = os.environ.get(
+            "SGLANG_MINIMAX_M3_SHARED_EXPERT_FUSION"
+        )
+        if shared_fusion_env == "1":
+            log_info_on_rank0(
+                logger,
+                "Shared experts fusion gate: "
+                f"module={__file__}, is_cuda={_is_cuda}, is_hip={_is_hip}, "
+                f"torch_hip={torch.version.hip}, "
+                f"enforce={server_args.enforce_shared_experts_fusion}, "
+                f"env={shared_fusion_env}",
+            )
 
         disable_reason = None
         if not getattr(self.config, "n_shared_experts", None):
             disable_reason = "No shared experts are defined in the config."
-        elif not _is_cuda:
+        elif not _is_cuda and not (
+            _is_hip
+            and (
+                server_args.enforce_shared_experts_fusion
+                or shared_fusion_env == "1"
+            )
+        ):
             disable_reason = "Shared experts fusion currently requires CUDA devices."
         elif _is_cuda and (_device_sm is not None) and (_device_sm < 80):
             disable_reason = "Shared experts fusion requires SM80 or newer GPUs."

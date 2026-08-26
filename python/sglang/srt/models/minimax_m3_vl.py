@@ -43,13 +43,20 @@ from sglang.srt.models.minimax_vl_common import (
     merge_vit_qkv_weights,
 )
 from sglang.srt.runtime_context import get_parallel, get_server_args
-from sglang.srt.utils import add_prefix, get_device_sm, is_cuda, log_info_on_rank0
+from sglang.srt.utils import (
+    add_prefix,
+    get_device_sm,
+    is_cuda,
+    is_hip,
+    log_info_on_rank0,
+)
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 logger = logging.getLogger(__name__)
 
 
 _is_cuda = is_cuda()
+_is_hip = is_hip()
 _device_sm = get_device_sm()
 
 
@@ -131,9 +138,11 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         disable_reason = None
         if not getattr(text_config, "n_shared_experts", None):
             disable_reason = "No shared experts are defined in the config."
-        elif not _is_cuda:
+        elif not _is_cuda and not (
+            _is_hip and server_args.enforce_shared_experts_fusion
+        ):
             disable_reason = "Shared experts fusion currently requires CUDA devices."
-        elif (_device_sm is not None) and (_device_sm < 80):
+        elif _is_cuda and (_device_sm is not None) and (_device_sm < 80):
             disable_reason = "Shared experts fusion requires SM80 or newer GPUs."
         elif get_parallel().moe_ep_size > 1:
             disable_reason = (
