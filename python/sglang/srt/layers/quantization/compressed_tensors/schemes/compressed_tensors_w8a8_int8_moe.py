@@ -32,6 +32,11 @@ from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsMoEScheme,
 )
+from sglang.srt.layers.quantization.rocm_w8a8_minimax_m3_moe import (
+    initialize_minimax_m3_moe_m1,
+    install_minimax_m3_moe_m1,
+    try_minimax_m3_moe_m1,
+)
 from sglang.srt.utils import get_bool_env_var, is_hcu, is_hip, set_weight_attrs
 
 if TYPE_CHECKING:
@@ -72,6 +77,9 @@ class NPUCompressedTensorsW8A8Int8DynamicMoE(CompressedTensorsMoEScheme):
             )
 
         self.static_input_scales = not self.input_quant.dynamic
+        self.specialized_symmetric = (
+            self.weight_quant.symmetric and self.input_quant.symmetric
+        )
         if self.static_input_scales:
             raise ValueError(
                 "For INT8 Fused MoE layers, we require channelwise, "
@@ -191,6 +199,7 @@ class CompressedTensorsW8A8Int8MoE(CompressedTensorsMoEScheme):
     def __init__(self, weight_quant, input_quant):
         self.weight_quant = weight_quant
         self.input_quant = input_quant
+        self.use_aiter_moe = _use_aiter_moe
 
         per_channel = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -204,6 +213,9 @@ class CompressedTensorsW8A8Int8MoE(CompressedTensorsMoEScheme):
             )
 
         self.static_input_scales = not self.input_quant.dynamic
+        self.specialized_symmetric = (
+            self.weight_quant.symmetric and self.input_quant.symmetric
+        )
         if self.static_input_scales:
             raise ValueError(
                 "For INT8 Fused MoE layers, we require channelwise, "
@@ -292,6 +304,7 @@ class CompressedTensorsW8A8Int8MoE(CompressedTensorsMoEScheme):
         assert not self.static_input_scales
         layer.w13_input_scale = None
         layer.w2_input_scale = None
+        initialize_minimax_m3_moe_m1(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale = torch.nn.Parameter(
@@ -300,7 +313,24 @@ class CompressedTensorsW8A8Int8MoE(CompressedTensorsMoEScheme):
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.data, requires_grad=False
         )
-        if not _use_aiter_moe:
+        config = self.moe_runner_config
+        if self.specialized_symmetric and install_minimax_m3_moe_m1(
+            layer,
+            layer.layer_name,
+            runner_backend=self.runner.runner_backend,
+            activation=config.activation,
+            is_gated=config.is_gated,
+            apply_router_weight_on_input=config.apply_router_weight_on_input,
+            inplace=config.inplace,
+            no_combine=config.no_combine,
+            routed_scaling_factor=config.routed_scaling_factor,
+            gemm1_alpha=config.gemm1_alpha,
+            gemm1_clamp_limit=config.gemm1_clamp_limit,
+            gate_up_interleaved=config.gate_up_interleaved,
+        ):
+            self.use_aiter_moe = False
+            return
+        if not self.use_aiter_moe:
             return
         shuffled_w13 = self._shuffle_w8a8_gemm1(layer.w13_weight)
         layer.w13_weight = torch.nn.Parameter(
@@ -329,8 +359,21 @@ class CompressedTensorsW8A8Int8MoE(CompressedTensorsMoEScheme):
 
         x = dispatch_output.hidden_states
         topk_weights, topk_ids, router_logits = dispatch_output.topk_output
+        specialized = None
+        if i_q is None and i_s is None:
+            specialized = try_minimax_m3_moe_m1(
+                layer,
+                layer.layer_name,
+                x,
+                dispatch_output.hidden_states_scale,
+                topk_ids,
+                topk_weights,
+                bias,
+            )
+        if specialized is not None:
+            return StandardCombineInput(hidden_states=specialized)
 
-        if _use_aiter_moe:
+        if self.use_aiter_moe:
             from aiter.moe import get_aiter_moe_config, aiter_moe, MoeQuantType
 
             E = layer.w13_weight.size(0)

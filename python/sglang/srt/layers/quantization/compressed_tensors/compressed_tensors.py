@@ -550,7 +550,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         return is_w4 and weight_quant.symmetric and is_token and is_dynamic
 
     def _get_scheme_from_parts(
-        self, weight_quant: BaseModel, input_quant: BaseModel
+        self,
+        weight_quant: BaseModel,
+        input_quant: BaseModel,
+        layer_name: str | None = None,
     ) -> CompressedTensorsLinearScheme:
 
         # Detect If Mixed Precision
@@ -616,6 +619,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                         strategy=weight_quant.strategy,
                         is_static_input_scheme=True,
                         input_symmetric=input_quant.symmetric,
+                        prefix=layer_name or "",
                     )
                 else:
                     return NPUCompressedTensorsW8A8Int8(
@@ -630,6 +634,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                         strategy=weight_quant.strategy,
                         is_static_input_scheme=False,
                         input_symmetric=input_quant.symmetric,
+                        prefix=layer_name or "",
                     )
                 else:
                     return NPUCompressedTensorsW8A8Int8(
@@ -823,6 +828,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
+                layer_name=layer_name,
             )
 
         # Raise error if device does not support the scheme

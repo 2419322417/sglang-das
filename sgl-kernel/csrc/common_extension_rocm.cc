@@ -48,6 +48,21 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   m.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   m.impl("gelu_quick", torch::kCUDA, &gelu_quick);
 
+  /*
+   * From csrc/quantization
+   */
+  m.def(
+      "w8a8_gfx928_shared_gate_up_m1(Tensor x, Tensor weight_k8n, Tensor weight_scale, Tensor? bias, Tensor! acc, "
+      "Tensor! counter) -> Tensor");
+  m.impl("w8a8_gfx928_shared_gate_up_m1", torch::kCUDA, &w8a8_gfx928_shared_gate_up_m1);
+
+  m.def(
+      "w8a8_gfx928_minimax_m3_moe_m1(Tensor(a!) x, Tensor w13_weight, Tensor w2_weight, Tensor w13_scale, "
+      "Tensor w2_scale, Tensor topk_ids, Tensor topk_weights, Tensor! x_q, Tensor! x_scale, Tensor! gate_up, "
+      "Tensor! activated, Tensor! activated_q, Tensor! activated_scale, Tensor! route_output, float alpha, float limit) "
+      "-> Tensor(a!)");
+  m.impl("w8a8_gfx928_minimax_m3_moe_m1", torch::kCUDA, &w8a8_gfx928_minimax_m3_moe_m1);
+
   m.def("fast_topk(Tensor score, Tensor indices, Tensor lengths, Tensor? row_starts) -> ()");
   m.impl("fast_topk", torch::kCUDA, &fast_topk_interface);
 

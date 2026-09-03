@@ -743,6 +743,7 @@ class Envs:
     SGLANG_IS_FIRST_RANK_ON_NODE = EnvBool(True)
     SGLANG_SYNC_TOKEN_IDS_ACROSS_TP = EnvBool(False)
     SGLANG_ENABLE_COLOCATED_BATCH_GEN = EnvBool(False)
+    SGLANG_ROCM_GFX928_W8A8_SHARED_GATE_UP_M1 = EnvBool(False)
 
     # Deterministic inference
     SGLANG_ENABLE_DETERMINISTIC_INFERENCE = EnvBool(False)

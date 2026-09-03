@@ -273,6 +273,30 @@ void sgl_per_token_group_quant_8bit_v2(
     bool fuse_silu_and_mul,
     const std::optional<torch::Tensor>& masked_m);
 void sgl_per_token_quant_fp8(at::Tensor input, at::Tensor output_q, at::Tensor output_s);
+at::Tensor w8a8_gfx928_shared_gate_up_m1(
+    const at::Tensor& x,
+    const at::Tensor& weight_k8n,
+    const at::Tensor& weight_scale,
+    const std::optional<at::Tensor>& bias,
+    at::Tensor& accumulation,
+    at::Tensor& counter);
+at::Tensor w8a8_gfx928_minimax_m3_moe_m1(
+    at::Tensor& x,
+    const at::Tensor& w13_weight,
+    const at::Tensor& w2_weight,
+    const at::Tensor& w13_scale,
+    const at::Tensor& w2_scale,
+    const at::Tensor& topk_ids,
+    const at::Tensor& topk_weights,
+    at::Tensor& x_q,
+    at::Tensor& x_scale,
+    at::Tensor& gate_up,
+    at::Tensor& activated,
+    at::Tensor& activated_q,
+    at::Tensor& activated_scale,
+    at::Tensor& route_output,
+    double alpha,
+    double limit);
 void bmm_fp8(
     at::Tensor A,
     at::Tensor B,

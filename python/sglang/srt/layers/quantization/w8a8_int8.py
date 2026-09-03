@@ -38,6 +38,16 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.compressed_tensors.utils import should_ignore_layer
+from sglang.srt.layers.quantization.rocm_w8a8_minimax_m3_moe import (
+    initialize_minimax_m3_moe_m1,
+    install_minimax_m3_moe_m1,
+    try_minimax_m3_moe_m1,
+)
+from sglang.srt.layers.quantization.rocm_w8a8_shared_gate_up import (
+    initialize_shared_gate_up_m1,
+    install_shared_gate_up_m1,
+    try_shared_gate_up_m1,
+)
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -139,7 +149,7 @@ class W8A8Int8Config(QuantizationConfig):
                 prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
             ):
                 return UnquantizedEmbeddingMethod()
-            return W8A8Int8LinearMethod(self)
+            return W8A8Int8LinearMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if should_ignore_layer(
                 prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
@@ -147,7 +157,7 @@ class W8A8Int8Config(QuantizationConfig):
                 return UnquantizedFusedMoEMethod(
                     layer.use_triton_kernels, layer.use_flashinfer_trtllm_moe
                 )
-            return W8A8Int8MoEMethod(self)
+            return W8A8Int8MoEMethod(self, prefix)
         elif isinstance(layer, RadixAttention):
             if should_ignore_layer(
                 prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
@@ -193,8 +203,9 @@ class W8A8Int8Config(QuantizationConfig):
 
 
 class W8A8Int8LinearMethod(LinearMethodBase):
-    def __init__(self, quantization_config: W8A8Int8Config):
+    def __init__(self, quantization_config: W8A8Int8Config, prefix: str):
         self.quantization_config = quantization_config
+        self.prefix = prefix
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if _is_cpu:
@@ -205,6 +216,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
             else:
                 assert False, "W8A8Int8LinearMethod on CPU only works on AMX or Arm64"
         else:
+            install_shared_gate_up_m1(layer, self.prefix)
             layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
         # PORT_CUSTOM_DEQUANT (sglang_full alignment): fold the per-output-
@@ -254,6 +266,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
+        initialize_shared_gate_up_m1(layer)
 
     def apply(
         self,
@@ -275,6 +288,9 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         # reference run (see process_weights_after_loading).
         if getattr(layer, "_dequantized_weight", None) is not None:
             return torch.nn.functional.linear(x, layer._dequantized_weight, bias)
+        specialized = try_shared_gate_up_m1(layer, self.prefix, x, bias)
+        if specialized is not None:
+            return specialized
         x_q, x_scale = per_token_quant_int8(x)
 
         x_q_2d = x_q.view(-1, x_q.shape[-1])
@@ -316,8 +332,9 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: W8A8Int8Config):
+    def __init__(self, quant_config: W8A8Int8Config, prefix: str):
         self.quant_config = quant_config
+        self.prefix = prefix
 
     def create_weights(
         self,
@@ -380,6 +397,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
 
         w2_input_scale = None
         layer.register_parameter("w2_input_scale", w2_input_scale)
+        initialize_minimax_m3_moe_m1(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if _is_hcu and self.runner.runner_backend.is_lightop():
@@ -412,6 +430,22 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         if os.environ.get("PORT_CUSTOM_DEQUANT") == "1":
             _dequant_moe_param(layer, "w13_weight", "w13_weight_scale")
             _dequant_moe_param(layer, "w2_weight", "w2_weight_scale")
+        else:
+            config = self.moe_runner_config
+            install_minimax_m3_moe_m1(
+                layer,
+                self.prefix,
+                runner_backend=self.runner.runner_backend,
+                activation=config.activation,
+                is_gated=config.is_gated,
+                apply_router_weight_on_input=config.apply_router_weight_on_input,
+                inplace=config.inplace,
+                no_combine=config.no_combine,
+                routed_scaling_factor=config.routed_scaling_factor,
+                gemm1_alpha=config.gemm1_alpha,
+                gemm1_clamp_limit=config.gemm1_clamp_limit,
+                gate_up_interleaved=config.gate_up_interleaved,
+            )
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
@@ -501,6 +535,19 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             if bias is not None:
                 output = output + bias
             return StandardCombineInput(hidden_states=output)
+
+        topk_weights, topk_ids, _ = topk_output
+        specialized = try_minimax_m3_moe_m1(
+            layer,
+            self.prefix,
+            x,
+            dispatch_output.hidden_states_scale,
+            topk_ids,
+            topk_weights,
+            bias,
+        )
+        if specialized is not None:
+            return StandardCombineInput(hidden_states=specialized)
 
         quant_info = self.get_triton_quant_info(layer)
 

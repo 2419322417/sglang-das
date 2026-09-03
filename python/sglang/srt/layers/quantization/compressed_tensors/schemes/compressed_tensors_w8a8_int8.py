@@ -25,6 +25,11 @@ from sglang.srt.layers.quantization.compressed_tensors import quant_ops as ops
 from sglang.srt.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsLinearScheme,
 )
+from sglang.srt.layers.quantization.rocm_w8a8_shared_gate_up import (
+    initialize_shared_gate_up_m1,
+    install_shared_gate_up_m1,
+    try_shared_gate_up_m1,
+)
 from sglang.srt.layers.quantization.utils import requantize_with_max_scale
 from sglang.srt.utils import get_bool_env_var, is_cuda, is_hcu
 
@@ -49,11 +54,16 @@ W8A8_TRITONJSON = W8a8GetCacheJSON()
 class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
 
     def __init__(
-        self, strategy: str, is_static_input_scheme: bool, input_symmetric: bool
+        self,
+        strategy: str,
+        is_static_input_scheme: bool,
+        input_symmetric: bool,
+        prefix: str = "",
     ):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
+        self.prefix = prefix
         self.w8a8_strategy = int(os.getenv("W8A8_SUPPORT_METHODS", "1"))  # TODO
 
     def create_weights(
@@ -94,6 +104,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
                 weight_loader=weight_loader,
             )
         layer.register_parameter("weight_scale", weight_scale)
+        initialize_shared_gate_up_m1(layer)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
@@ -119,6 +130,16 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
     def process_weights_after_loading(self, layer) -> None:
         n = layer.weight.shape[0]
         k = layer.weight.shape[1]
+
+        install_shared_gate_up_m1(
+            layer,
+            self.prefix,
+            compressed_dynamic_symmetric_channel=(
+                self.strategy == QuantizationStrategy.CHANNEL
+                and not self.is_static_input_scheme
+                and self.input_symmetric
+            ),
+        )
 
         if self.w8a8_strategy == 1:
             if [n, k] not in W8A8_TRITONJSON.weight_shapes:
@@ -281,6 +302,11 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
         input_quant_args: Optional[list[torch.Tensor]] = None,
         silu_quant_args: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if input_quant_args is None and silu_quant_args is None:
+            specialized = try_shared_gate_up_m1(layer, self.prefix, x, bias)
+            if specialized is not None:
+                return specialized
+
         # TODO: add cutlass_scaled_mm_azp support
         if _use_fused_rms_quant and input_quant_args is not None:
             assert len(input_quant_args) == 2
