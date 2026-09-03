@@ -287,3 +287,6 @@ test-results/
 *.hip
 *_hip.*
 .humanize/
+
+# Claude Code worktree/state dirs
+.claude/
