@@ -61,6 +61,10 @@ sources = [
     "csrc/moe/moe_topk_sigmoid_kernels.cu",
     "csrc/quantization/w8a8_gfx928_minimax_m3_moe_m1.hip",
     "csrc/quantization/w8a8_gfx928_shared_gate_up_m1.hip",
+    "csrc/quantization/w8a8_gfx928_qkv_proj_m1.hip",
+    "csrc/quantization/w8a8_gfx928_o_proj_m1.hip",
+    "csrc/quantization/w8a8_gfx928_dense_gate_up_m1.hip",
+    "csrc/quantization/w8a8_gfx928_dense_down_m1.hip",
     "csrc/speculative/eagle_utils.cu",
     "csrc/kvcacheio/transfer.cu",
     "csrc/memory/weak_ref_tensor.cpp",
@@ -112,6 +116,10 @@ hipcc_flags = [
     f"-DSGL_TOPK_DYNAMIC_SMEM_BYTES={topk_dynamic_smem_bytes}",
     f"-DSGL_W8A8_GFX928_MINIMAX_M3_MOE_M1_BUILD={int(amdgpu_target == 'gfx928')}",
     f"-DSGL_W8A8_GFX928_SHARED_GATE_UP_M1_BUILD={int(amdgpu_target == 'gfx928')}",
+    f"-DSGL_W8A8_GFX928_QKV_PROJ_M1_BUILD={int(amdgpu_target == 'gfx928')}",
+    f"-DSGL_W8A8_GFX928_O_PROJ_M1_BUILD={int(amdgpu_target == 'gfx928')}",
+    f"-DSGL_W8A8_GFX928_DENSE_GATE_UP_M1_BUILD={int(amdgpu_target == 'gfx928')}",
+    f"-DSGL_W8A8_GFX928_DENSE_DOWN_M1_BUILD={int(amdgpu_target == 'gfx928')}",
 ]
 
 ext_modules = [

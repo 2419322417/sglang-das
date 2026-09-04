@@ -57,6 +57,22 @@ TORCH_LIBRARY_EXPAND(sgl_kernel, m) {
   m.impl("w8a8_gfx928_shared_gate_up_m1", torch::kCUDA, &w8a8_gfx928_shared_gate_up_m1);
 
   m.def(
+      "w8a8_gfx928_qkv_proj_m1(Tensor x, Tensor weight_k4n, Tensor weight_scale, Tensor? bias, Tensor! acc, Tensor! counter) -> Tensor");
+  m.impl("w8a8_gfx928_qkv_proj_m1", torch::kCUDA, &w8a8_gfx928_qkv_proj_m1);
+
+  m.def(
+      "w8a8_gfx928_o_proj_m1(Tensor x, Tensor weight_tile, Tensor weight_scale, Tensor? bias) -> Tensor");
+  m.impl("w8a8_gfx928_o_proj_m1", torch::kCUDA, &w8a8_gfx928_o_proj_m1);
+
+  m.def(
+      "w8a8_gfx928_dense_gate_up_m1(Tensor x, Tensor weight_k4n, Tensor weight_scale, Tensor? bias, Tensor! qx, Tensor! act_scale, Tensor! acc, Tensor! counter) -> Tensor");
+  m.impl("w8a8_gfx928_dense_gate_up_m1", torch::kCUDA, &w8a8_gfx928_dense_gate_up_m1);
+
+  m.def(
+      "w8a8_gfx928_dense_down_m1(Tensor x, Tensor weight_k4n, Tensor weight_scale, Tensor? bias, Tensor! qx, Tensor! act_scale, Tensor! acc, Tensor! counter) -> Tensor");
+  m.impl("w8a8_gfx928_dense_down_m1", torch::kCUDA, &w8a8_gfx928_dense_down_m1);
+
+  m.def(
       "w8a8_gfx928_minimax_m3_moe_m1(Tensor(a!) x, Tensor w13_weight, Tensor w2_weight, Tensor w13_scale, "
       "Tensor w2_scale, Tensor topk_ids, Tensor topk_weights, Tensor! x_q, Tensor! x_scale, Tensor! gate_up, "
       "Tensor! activated, Tensor! activated_q, Tensor! activated_scale, Tensor! route_output, float alpha, float limit) "

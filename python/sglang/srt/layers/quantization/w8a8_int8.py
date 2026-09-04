@@ -48,6 +48,26 @@ from sglang.srt.layers.quantization.rocm_w8a8_shared_gate_up import (
     install_shared_gate_up_m1,
     try_shared_gate_up_m1,
 )
+from sglang.srt.layers.quantization.rocm_w8a8_qkv_proj import (
+    initialize_qkv_proj_m1,
+    install_qkv_proj_m1,
+    try_qkv_proj_m1,
+)
+from sglang.srt.layers.quantization.rocm_w8a8_o_proj import (
+    initialize_o_proj_m1,
+    install_o_proj_m1,
+    try_o_proj_m1,
+)
+from sglang.srt.layers.quantization.rocm_w8a8_dense_gate_up import (
+    initialize_dense_gate_up_m1,
+    install_dense_gate_up_m1,
+    try_dense_gate_up_m1,
+)
+from sglang.srt.layers.quantization.rocm_w8a8_dense_down import (
+    initialize_dense_down_m1,
+    install_dense_down_m1,
+    try_dense_down_m1,
+)
 from sglang.srt.layers.quantization.unquant import UnquantizedEmbeddingMethod
 from sglang.srt.utils import (
     cpu_has_amx_support,
@@ -217,6 +237,10 @@ class W8A8Int8LinearMethod(LinearMethodBase):
                 assert False, "W8A8Int8LinearMethod on CPU only works on AMX or Arm64"
         else:
             install_shared_gate_up_m1(layer, self.prefix)
+            install_qkv_proj_m1(layer, self.prefix)
+            install_o_proj_m1(layer, self.prefix)
+            install_dense_gate_up_m1(layer, self.prefix)
+            install_dense_down_m1(layer, self.prefix)
             layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
         # PORT_CUSTOM_DEQUANT (sglang_full alignment): fold the per-output-
@@ -267,6 +291,10 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
         initialize_shared_gate_up_m1(layer)
+        initialize_qkv_proj_m1(layer)
+        initialize_o_proj_m1(layer)
+        initialize_dense_gate_up_m1(layer)
+        initialize_dense_down_m1(layer)
 
     def apply(
         self,
@@ -288,6 +316,18 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         # reference run (see process_weights_after_loading).
         if getattr(layer, "_dequantized_weight", None) is not None:
             return torch.nn.functional.linear(x, layer._dequantized_weight, bias)
+        specialized = try_qkv_proj_m1(layer, self.prefix, x, bias)
+        if specialized is not None:
+            return specialized
+        specialized = try_o_proj_m1(layer, self.prefix, x, bias)
+        if specialized is not None:
+            return specialized
+        specialized = try_dense_gate_up_m1(layer, self.prefix, x, bias)
+        if specialized is not None:
+            return specialized
+        specialized = try_dense_down_m1(layer, self.prefix, x, bias)
+        if specialized is not None:
+            return specialized
         specialized = try_shared_gate_up_m1(layer, self.prefix, x, bias)
         if specialized is not None:
             return specialized

@@ -7448,11 +7448,18 @@ class ServerArgs:
             assert (
                 self.disable_overlap_schedule
             ), "PD-Multiplexing is not compatible with overlap schedule."
-            assert not envs.SGLANG_ROCM_GFX928_W8A8_SHARED_GATE_UP_M1.get(), (
-                "PD-Multiplexing is not compatible with "
-                "SGLANG_ROCM_GFX928_W8A8_SHARED_GATE_UP_M1 because the operator "
-                "uses layer-owned mutable workspace."
-            )
+            for _gfx928_w8a8_env in (
+                "SGLANG_ROCM_GFX928_W8A8_SHARED_GATE_UP_M1",
+                "SGLANG_ROCM_GFX928_W8A8_QKV_PROJ_M1",
+                "SGLANG_ROCM_GFX928_W8A8_O_PROJ_M1",
+                "SGLANG_ROCM_GFX928_W8A8_DENSE_GATE_UP_M1",
+                "SGLANG_ROCM_GFX928_W8A8_DENSE_DOWN_M1",
+            ):
+                assert not getattr(envs, _gfx928_w8a8_env).get(), (
+                    "PD-Multiplexing is not compatible with "
+                    f"{_gfx928_w8a8_env} because the operator "
+                    "uses layer-owned mutable workspace."
+                )
 
             # NOTE: CUDA Green Context may encounter potential issues with CudaGraph on torch 2.7.x – 2.8.x, leading to performance degradation.
             import torch

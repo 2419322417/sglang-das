@@ -297,6 +297,36 @@ at::Tensor w8a8_gfx928_minimax_m3_moe_m1(
     at::Tensor& route_output,
     double alpha,
     double limit);
+at::Tensor w8a8_gfx928_qkv_proj_m1(
+    const at::Tensor& x,
+    const at::Tensor& weight_k4n,
+    const at::Tensor& weight_scale,
+    const std::optional<at::Tensor>& bias,
+    at::Tensor& acc,
+    at::Tensor& counter);
+at::Tensor w8a8_gfx928_o_proj_m1(
+    const at::Tensor& x,
+    const at::Tensor& weight_tile,
+    const at::Tensor& weight_scale,
+    const std::optional<at::Tensor>& bias);
+at::Tensor w8a8_gfx928_dense_gate_up_m1(
+    const at::Tensor& x,
+    const at::Tensor& weight_k4n,
+    const at::Tensor& weight_scale,
+    const std::optional<at::Tensor>& bias,
+    at::Tensor& qx,
+    at::Tensor& act_scale,
+    at::Tensor& partial,
+    at::Tensor& counter);
+at::Tensor w8a8_gfx928_dense_down_m1(
+    const at::Tensor& x,
+    const at::Tensor& weight_k4n,
+    const at::Tensor& weight_scale,
+    const std::optional<at::Tensor>& bias,
+    at::Tensor& qx,
+    at::Tensor& act_scale,
+    at::Tensor& acc,
+    at::Tensor& counter);
 void bmm_fp8(
     at::Tensor A,
     at::Tensor B,
